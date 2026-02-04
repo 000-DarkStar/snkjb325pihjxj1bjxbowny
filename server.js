@@ -17,7 +17,7 @@ app.use(express.static("public")); // pour servir gate.html ou autres fichiers s
 // Page gate
 app.get("/", (req, res) => {
   if (req.cookies.captchaValidated) {
-    res.send("Accès autorisé ✅"); // tu peux mettre ton vrai site ici si tu veux
+    res.send("https://searchlabs.pages.dev"); // tu peux mettre ton vrai site ici si tu veux
   } else {
     res.sendFile(path.join(__dirname, "gate.html"));
   }
@@ -49,6 +49,7 @@ app.post("/verify-turnstile", async (req, res) => {
 });
 
 server.listen(PORT, () => console.log("Server running on port " + PORT));
+
 
 
 
