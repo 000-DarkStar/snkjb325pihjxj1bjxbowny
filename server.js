@@ -2,11 +2,16 @@ const express = require("express");
 const http = require("http");
 const socketIo = require("socket.io");
 const fetch = require("node-fetch");
+const cors = require("cors");
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] }
+  cors: { 
+    origin: "https://searchlabs.pages.dev",
+    methods: ["GET", "POST"],
+    credentials: true
+  }
 });
 
 // Configuration
@@ -14,8 +19,12 @@ const TURNSTILE_SECRET = "0x4AAAAAACXtON1ce0GeOud1iJJ6Uve9U7U";
 const PORT = process.env.PORT || 3000;
 
 // Middlewares
+app.use(cors({
+  origin: "https://searchlabs.pages.dev",
+  methods: ["GET", "POST"],
+  credentials: true
+}));
 app.use(express.json());
-app.use(require("cors")());
 
 // Compteur utilisateurs
 let users = 0;
@@ -55,7 +64,7 @@ app.post("/verify", async (req, res) => {
   }
 });
 
-// Route de status (optionnelle mais utile pour debug)
+// Route de status
 app.get("/api/status", (req, res) => {
   res.json({
     status: "online",
