@@ -19,7 +19,7 @@ app.get("/", (req, res) => {
   if (req.cookies.captchaValidated) {
     res.send("Accès autorisé ✅"); // tu peux mettre ton vrai site ici si tu veux
   } else {
-    res.sendFile(__dirname + "/public/gate.html"); // juste le Turnstile
+    res.sendFile(__dirname + "gate.html"); // juste le Turnstile
   }
 });
 
@@ -49,4 +49,5 @@ app.post("/verify-turnstile", async (req, res) => {
 });
 
 server.listen(PORT, () => console.log("Server running on port " + PORT));
+
 
