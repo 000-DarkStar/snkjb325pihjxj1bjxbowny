@@ -68,10 +68,3 @@ app.get("/api/status", (req, res) => {
 server.listen(PORT, () => {
   console.log(`✅ Serveur sur le port ${PORT}`);
 });
-```
-
-Push ça sur GitHub (dans le même repo que le backend), et Render va redéployer automatiquement.
-
-Ensuite teste :
-```
-https://snkjb325pihjxj1bjxbowny.onrender.com/api/status
