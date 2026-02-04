@@ -6,7 +6,7 @@ const cookieParser = require("cookie-parser");
 const app = express();
 const server = http.createServer(app);
 
-const SECRET_KEY = "TA_SECRET_KEY_ICI"; // ta clé secrète Cloudflare
+const SECRET_KEY = "0x4AAAAAACXtON1ce0GeOud1iJJ6Uve9U7U"; // ta clé secrète Cloudflare
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
@@ -49,3 +49,4 @@ app.post("/verify-turnstile", async (req, res) => {
 });
 
 server.listen(PORT, () => console.log("Server running on port " + PORT));
+
