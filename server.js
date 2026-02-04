@@ -55,7 +55,23 @@ app.post("/verify", async (req, res) => {
   }
 });
 
+// Route de status (optionnelle mais utile pour debug)
+app.get("/api/status", (req, res) => {
+  res.json({
+    status: "online",
+    onlineUsers: users,
+    timestamp: new Date().toISOString()
+  });
+});
+
 // Démarrage
 server.listen(PORT, () => {
   console.log(`✅ Serveur sur le port ${PORT}`);
 });
+```
+
+Push ça sur GitHub (dans le même repo que le backend), et Render va redéployer automatiquement.
+
+Ensuite teste :
+```
+https://snkjb325pihjxj1bjxbowny.onrender.com/api/status
