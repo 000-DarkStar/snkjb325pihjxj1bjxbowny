@@ -1,52 +1,29 @@
 const express = require("express");
 const http = require("http");
-const { Server } = require("socket.io");
 const fetch = require("node-fetch");
 const cookieParser = require("cookie-parser");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: "*", // autorise Cloudflare Pages ou autre frontend
-    methods: ["GET", "POST"]
-  }
-});
 
-const SECRET_KEY = "TA_SECRET_KEY_ICI"; // remplace par ta clé secrète Cloudflare
+const SECRET_KEY = "TA_SECRET_KEY_ICI"; // ta clé secrète Cloudflare
 const PORT = process.env.PORT || 3000;
 
-let onlineUsers = 0;
-
-// Middleware pour parser POST JSON et cookies
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(express.static("public")); // pour servir gate.html ou autres fichiers statiques
 
-// --- Socket.io compteur d'utilisateurs ---
-io.on("connection", (socket) => {
-  onlineUsers++;
-  io.emit("updateUsers", onlineUsers);
-
-  socket.on("disconnect", () => {
-    onlineUsers--;
-    if (onlineUsers < 0) onlineUsers = 0;
-    io.emit("updateUsers", onlineUsers);
-  });
-});
-
-// --- Routes ---
+// Page gate
 app.get("/", (req, res) => {
-  // Vérifie si captcha déjà validé via cookie
   if (req.cookies.captchaValidated) {
-    res.sendFile(__dirname + "/public/home.html"); // ton vrai site
+    res.send("Accès autorisé ✅"); // tu peux mettre ton vrai site ici si tu veux
   } else {
-    res.sendFile(__dirname + "/public/gate.html"); // page captcha
+    res.sendFile(__dirname + "/public/gate.html"); // juste le Turnstile
   }
 });
 
-// Route pour vérifier Turnstile
+// Vérification Turnstile
 app.post("/verify-turnstile", async (req, res) => {
   const token = req.body["cf-turnstile-response"];
   if (!token) return res.status(400).json({ success: false, message: "Captcha manquant" });
@@ -61,7 +38,6 @@ app.post("/verify-turnstile", async (req, res) => {
     const data = await response.json();
 
     if (data.success) {
-      // Captcha OK → on met un cookie pour éviter de refaire le captcha
       res.cookie("captchaValidated", "true", { maxAge: 24 * 60 * 60 * 1000 }); // 1 jour
       return res.json({ success: true });
     } else {
@@ -72,12 +48,4 @@ app.post("/verify-turnstile", async (req, res) => {
   }
 });
 
-// Page de test /home
-app.get("/home", (req, res) => {
-  res.sendFile(__dirname + "/public/home.html");
-});
-
-// Lancement du serveur
-server.listen(PORT, () => {
-  console.log("Server running on port " + PORT);
-});
+server.listen(PORT, () => console.log("Server running on port " + PORT));
