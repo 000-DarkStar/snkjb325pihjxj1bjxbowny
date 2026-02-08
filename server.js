@@ -15,7 +15,7 @@ const io = socketIo(server, {
 });
 
 // Configuration
-const TURNSTILE_SECRET = "0x4AAAAAACXtON1ce0GeOud1iJJ6Uve9U7U";
+const TURNSTILE_SECRET = "0x4AAAAAACXtOAo2YMkszq-RYglD_O_URx8";
 const PORT = process.env.PORT || 3000;
 
 // Middlewares
@@ -28,9 +28,11 @@ app.use(express.json());
 
 // Compteur utilisateurs
 let users = 0;
+
 io.on("connection", (socket) => {
   users++;
   io.emit("users", users);
+  
   socket.on("disconnect", () => {
     users--;
     io.emit("users", users);
@@ -38,29 +40,51 @@ io.on("connection", (socket) => {
 });
 
 // Vérification Turnstile
-app.post("/verify", async (req, res) => {
-  const token = req.body.token;
+app.post("/verify-captcha", async (req, res) => {
+  const { token } = req.body;
   
   if (!token) {
-    return res.json({ success: false, message: "Token manquant" });
+    return res.json({ 
+      success: false, 
+      message: "Token captcha manquant" 
+    });
   }
 
   try {
+    console.log("🔐 Vérification captcha...");
+    
     const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { 
+        "Content-Type": "application/x-www-form-urlencoded" 
+      },
       body: `secret=${TURNSTILE_SECRET}&response=${token}`
     });
 
     const data = await response.json();
     
+    console.log("📡 Réponse Cloudflare:", data);
+    
     if (data.success) {
-      return res.json({ success: true });
+      console.log("✅ Captcha validé");
+      return res.json({ 
+        success: true,
+        message: "Captcha vérifié avec succès" 
+      });
     } else {
-      return res.json({ success: false, message: "Captcha invalide" });
+      console.log("❌ Captcha invalide:", data["error-codes"]);
+      return res.json({ 
+        success: false, 
+        message: "Captcha invalide ou expiré",
+        errors: data["error-codes"]
+      });
     }
   } catch (err) {
-    return res.json({ success: false, message: "Erreur serveur" });
+    console.error("❌ Erreur serveur:", err);
+    return res.json({ 
+      success: false, 
+      message: "Erreur lors de la vérification du captcha" 
+    });
   }
 });
 
@@ -73,7 +97,13 @@ app.get("/api/status", (req, res) => {
   });
 });
 
+// Health check
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
 // Démarrage
 server.listen(PORT, () => {
-  console.log(`✅ Serveur sur le port ${PORT}`);
+  console.log(`✅ Serveur démarré sur le port ${PORT}`);
+  console.log(`🌐 CORS autorisé pour: https://searchlabs.pages.dev`);
 });
