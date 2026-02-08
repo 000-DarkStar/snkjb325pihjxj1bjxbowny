@@ -51,7 +51,7 @@ app.post("/verify-captcha", async (req, res) => {
   }
 
   try {
-    console.log("🔐 Vérification captcha...");
+    console.log("43bh5134kb1534jlbnlh143jki5gbnbigw4");
     
     const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
       method: "POST",
@@ -107,3 +107,4 @@ server.listen(PORT, () => {
   console.log(`✅ Serveur démarré sur le port ${PORT}`);
   console.log(`🌐 CORS autorisé pour: https://searchlabs.pages.dev`);
 });
+
