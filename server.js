@@ -5,7 +5,6 @@ const cors = require("cors");
 
 const app = express();
 const server = http.createServer(app);
-
 const io = socketIo(server, {
   cors: { 
     origin: "*",
@@ -24,7 +23,6 @@ app.use(cors({
   credentials: true,
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
-
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -47,6 +45,16 @@ io.on("connection", (socket) => {
     console.log(`👋 Utilisateur déconnecté. Total: ${users}`);
     io.emit("users", users);
   });
+});
+
+// Route racine (pour Render health checks)
+app.get("/", (req, res) => {
+  res.redirect("/test");
+});
+
+// Favicon (évite les erreurs 404)
+app.get("/favicon.ico", (req, res) => {
+  res.status(204).end();
 });
 
 // Health check
@@ -98,11 +106,12 @@ app.get("/test", (req, res) => {
       
       <h2>📡 Endpoints disponibles:</h2>
       <ul>
+        <li><strong>GET /</strong> - Redirection vers /test</li>
         <li><strong>GET /health</strong> - Health check</li>
         <li><strong>GET /api/status</strong> - Statut serveur</li>
         <li><strong>WebSocket</strong> - Compteur utilisateurs en temps réel</li>
       </ul>
-
+      
       <h2>ℹ️ Note:</h2>
       <p>La vérification captcha est maintenant gérée directement par Supabase.</p>
     </body>
