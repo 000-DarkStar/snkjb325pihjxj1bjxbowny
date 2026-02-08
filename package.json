@@ -1,14 +1,21 @@
 {
-  "name": "searchlabs",
+  "name": "deadeyes-backend",
   "version": "1.0.0",
+  "description": "Backend pour DeadEyes - WebSocket et API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
+  "keywords": [
+    "websocket",
+    "api",
+    "deadeyes"
+  ],
+  "author": "",
+  "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",
-    "socket.io": "^4.7.2",
-    "node-fetch": "^2.7.0",
+    "socket.io": "^4.6.1",
     "cors": "^2.8.5"
   }
 }
