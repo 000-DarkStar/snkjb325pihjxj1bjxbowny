@@ -15,6 +15,9 @@ const io = socketIo(server, {
 // Configuration
 const PORT = process.env.PORT || 3000;
 
+// Mettre votre secret Turnstile en variable d'env sur Render
+const TURNSTILE_SECRET = process.env.TURNSTILE_SECRET || "";
+
 // Middlewares
 app.use(cors({
   origin: "*",
@@ -223,13 +226,62 @@ app.get("/api/stats/dashboard", (req, res) => {
   });
 });
 
+// ══════════════════════════════════════════════════════════════════
+//  VÉRIFICATION CAPTCHA TURNSTILE
+//  Appelé par register.html avant la création de compte Supabase
+//  POST /verify-captcha
+//  Body  : { token: string }
+//  Retour: { success: bool, message?: string }
+// ══════════════════════════════════════════════════════════════════
+app.post("/verify-captcha", async (req, res) => {
+  const { token } = req.body;
+
+  if (!token || typeof token !== "string" || token.length > 2048) {
+    return res.status(400).json({ success: false, message: "Token manquant ou invalide" });
+  }
+
+  // Mode dev: si le secret n'est pas configuré on laisse passer
+  if (!TURNSTILE_SECRET) {
+    console.warn("⚠️ [CAPTCHA] TURNSTILE_SECRET absent — vérification ignorée (mode dev)");
+    return res.json({ success: true });
+  }
+
+  try {
+    const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+
+    const formBody = new URLSearchParams({
+      secret: TURNSTILE_SECRET,
+      response: token,
+      remoteip: ip
+    });
+
+    const cfRes = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      body: formBody
+    });
+
+    const data = await cfRes.json();
+    console.log(`🔒 [CAPTCHA] success=${data.success} | ip=${ip}`);
+
+    if (!data.success) {
+      return res.status(400).json({ success: false, message: "Captcha invalide, veuillez réessayer" });
+    }
+
+    res.json({ success: true });
+
+  } catch (err) {
+    console.error("❌ [CAPTCHA] Erreur:", err.message);
+    res.status(500).json({ success: false, message: "Erreur serveur lors de la vérification" });
+  }
+});
+
 // Route de test avec info complète
 app.get("/test", (req, res) => {
   res.send(`
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Backend DeadEyes</title>
+      <title>Backend Rapace</title>
       <style>
         body { 
           font-family: monospace; 
@@ -273,23 +325,30 @@ app.get("/test", (req, res) => {
       </style>
     </head>
     <body>
-      <h1 class="success">✅ Backend DeadEyes Opérationnel!</h1>
+      <h1 class="success">✅ Backend Rapace Opérationnel!</h1>
       <p class="info">🕐 ${new Date().toISOString()}</p>
       <p class="info">📍 Port: ${PORT}</p>
       <p class="info">👥 Utilisateurs en ligne: ${users}</p>
-      <p class="info">💬 Messages en mémoire: ${chatMessages.length}</p>
+      <p class="info">💬 Messages en mémoire: ${chatMessages.length}/${MAX_MESSAGES}</p>
+      <p class="info">🔒 Captcha: ${TURNSTILE_SECRET ? "CONFIGURÉ ✅" : "NON CONFIGURÉ (dev mode) ⚠️"}</p>
       
       <div class="section">
         <h2>📡 Endpoints Standards:</h2>
         <ul>
+          <li class="endpoint"><span class="method">GET</span> <code>/</code> — Redirection vers /test</li>
+          <li class="endpoint"><span class="method">GET</span> <code>/health</code> — Health check Render</li>
+          <li class="endpoint"><span class="method">GET</span> <code>/api/status</code> — Statut + users en ligne</li>
+        </ul>
+      </div>
+
+      <div class="section">
+        <h2>🔒 Endpoint Captcha:</h2>
+        <ul>
           <li class="endpoint">
-            <span class="method">GET</span> <code>/</code> - Redirection vers /test
-          </li>
-          <li class="endpoint">
-            <span class="method">GET</span> <code>/health</code> - Health check
-          </li>
-          <li class="endpoint">
-            <span class="method">GET</span> <code>/api/status</code> - Statut serveur + users en ligne
+            <span class="method">POST</span> <code>/verify-captcha</code><br>
+            Body: <code>{ token: string }</code><br>
+            Réponse: <code>{ success: bool, message?: string }</code><br>
+            Variable env requise: <code>TURNSTILE_SECRET</code>
           </li>
         </ul>
       </div>
@@ -297,24 +356,15 @@ app.get("/test", (req, res) => {
       <div class="section">
         <h2>💬 Endpoints Chat:</h2>
         <ul>
-          <li class="endpoint">
-            <span class="method">GET</span> <code>/api/chat/messages?limit=50</code><br>
-            → Récupérer l'historique des messages
-          </li>
-          <li class="endpoint">
-            <span class="method">GET</span> <code>/api/chat/stats</code><br>
-            → Statistiques du chat (messages, users connectés)
-          </li>
+          <li class="endpoint"><span class="method">GET</span> <code>/api/chat/messages?limit=50</code><br>→ Récupérer l'historique des messages</li>
+          <li class="endpoint"><span class="method">GET</span> <code>/api/chat/stats</code><br>→ Statistiques du chat</li>
         </ul>
       </div>
 
       <div class="section">
         <h2>📊 Endpoints Stats:</h2>
         <ul>
-          <li class="endpoint">
-            <span class="method">GET</span> <code>/api/stats/dashboard</code><br>
-            → Stats globales (lignes indexées, recherches, users)
-          </li>
+          <li class="endpoint"><span class="method">GET</span> <code>/api/stats/dashboard</code><br>→ Stats globales</li>
         </ul>
       </div>
 
@@ -322,65 +372,26 @@ app.get("/test", (req, res) => {
         <h2>🔌 Socket.IO Events:</h2>
         <h3>📤 Émis par le client:</h3>
         <ul>
-          <li class="endpoint">
-            <code>chat:join</code> - Se connecter au chat<br>
-            Payload: <code>{ pseudo: "username" }</code>
-          </li>
-          <li class="endpoint">
-            <code>chat:send</code> - Envoyer un message<br>
-            Payload: <code>{ pseudo: "username", content: "message", id: "optional" }</code>
-          </li>
-          <li class="endpoint">
-            <code>chat:typing</code> - Indicateur de frappe<br>
-            Payload: <code>{ pseudo: "username", isTyping: true }</code>
-          </li>
+          <li class="endpoint"><code>chat:join</code> — <code>{ pseudo: "username" }</code></li>
+          <li class="endpoint"><code>chat:send</code> — <code>{ pseudo: "username", content: "message" }</code></li>
+          <li class="endpoint"><code>chat:typing</code> — <code>{ pseudo: "username", isTyping: true }</code></li>
         </ul>
-
         <h3>📥 Reçus par le client:</h3>
         <ul>
-          <li class="endpoint">
-            <code>users</code> - Nombre d'utilisateurs en ligne<br>
-            Payload: <code>number</code>
-          </li>
-          <li class="endpoint">
-            <code>chat:history</code> - Historique des messages (à la connexion)<br>
-            Payload: <code>Array&lt;Message&gt;</code>
-          </li>
-          <li class="endpoint">
-            <code>chat:message</code> - Nouveau message<br>
-            Payload: <code>{ id, pseudo, content, created_at, isSystem? }</code>
-          </li>
-          <li class="endpoint">
-            <code>chat:userTyping</code> - Un utilisateur est en train de taper<br>
-            Payload: <code>{ pseudo, isTyping }</code>
-          </li>
-          <li class="endpoint">
-            <code>chat:error</code> - Erreur<br>
-            Payload: <code>{ message: "error message" }</code>
-          </li>
+          <li class="endpoint"><code>users</code> — nombre d'utilisateurs (number)</li>
+          <li class="endpoint"><code>chat:history</code> — historique à la connexion (Array)</li>
+          <li class="endpoint"><code>chat:message</code> — <code>{ id, pseudo, content, created_at, isSystem? }</code></li>
+          <li class="endpoint"><code>chat:userTyping</code> — <code>{ pseudo, isTyping }</code></li>
+          <li class="endpoint"><code>chat:error</code> — <code>{ message }</code></li>
         </ul>
       </div>
 
       <div class="section">
-        <h2 class="warning">⚙️ Fonctionnalités:</h2>
+        <h2 class="warning">⚙️ Config Render — Variables d'environnement:</h2>
         <ul>
-          <li>✅ WebSocket en temps réel (Socket.io)</li>
-          <li>✅ Chat en direct avec historique (100 derniers messages)</li>
-          <li>✅ Messages système (join/leave)</li>
-          <li>✅ Indicateur de frappe (typing)</li>
-          <li>✅ Validation des messages (max 1000 caractères)</li>
-          <li>✅ CORS configuré pour accepter toutes les origines</li>
-          <li>✅ Compteur d'utilisateurs en temps réel</li>
-        </ul>
-      </div>
-
-      <div class="section">
-        <h2>ℹ️ Notes:</h2>
-        <ul>
-          <li>📝 Les messages sont stockés en mémoire (100 max)</li>
-          <li>🔄 Le serveur redémarre = messages perdus</li>
-          <li>💾 Pour persistence: connecter à Supabase ou MongoDB</li>
-          <li>🔐 Authentification gérée par Supabase côté frontend</li>
+          <li class="endpoint"><code>TURNSTILE_SECRET</code> — Secret Cloudflare Turnstile (obligatoire en prod)</li>
+          <li class="endpoint"><code>NODE_ENV</code> — production</li>
+          <li class="endpoint"><code>PORT</code> — défini automatiquement par Render</li>
         </ul>
       </div>
 
@@ -403,7 +414,7 @@ app.use((req, res) => {
 // ==================== DÉMARRAGE ====================
 server.listen(PORT, () => {
   console.log("\n" + "=".repeat(70));
-  console.log("🚀 SERVEUR DEADEYES DÉMARRÉ");
+  console.log("🚀 SERVEUR RAPACE DÉMARRÉ");
   console.log("=".repeat(70));
   console.log(`📍 Port: ${PORT}`);
   console.log(`🌐 URL: https://snkjb325pihjxj1bjxbowny.onrender.com`);
@@ -411,6 +422,7 @@ server.listen(PORT, () => {
   console.log(`📊 WebSocket: Compteur utilisateurs activé`);
   console.log(`💬 Chat: Système Socket.io activé`);
   console.log(`📝 Historique: ${MAX_MESSAGES} messages max en mémoire`);
+  console.log(`🔒 Captcha: ${TURNSTILE_SECRET ? "CONFIGURÉ" : "NON CONFIGURÉ (set TURNSTILE_SECRET)"}`);
   console.log("=".repeat(70) + "\n");
   console.log("✅ Prêt à recevoir des requêtes!\n");
 });
