@@ -1,428 +1,411 @@
-const express = require("express");
-const http = require("http");
-const socketIo = require("socket.io");
-const cors = require("cors");
-const app = express();
+const express    = require("express");
+const http       = require("http");
+const socketIo   = require("socket.io");
+const cors       = require("cors");
+const rateLimit  = require("express-rate-limit");
+const helmet     = require("helmet");
+const validator  = require("validator");
+const crypto     = require("crypto");
+const fs         = require("fs");
+const path       = require("path");
+
+const app    = express();
 const server = http.createServer(app);
-const io = socketIo(server, {
-  cors: { 
-    origin: "*",
-    methods: ["GET", "POST"],
-    credentials: true
-  }
+const io     = socketIo(server, {
+    cors: { origin: "*", methods: ["GET", "POST"], credentials: true }
 });
 
-// Configuration
-const PORT = process.env.PORT || 3000;
+// ==================== CONFIGURATION ====================
+const PORT             = process.env.PORT || 3000;
+const TURNSTILE_SECRET = process.env.TURNSTILE_SECRET || ""; // variable d'env sur Render
+const ALLOWED_ORIGINS  = (process.env.ALLOWED_ORIGINS || "*").split(",").map(s => s.trim());
 
-// Mettre votre secret Turnstile en variable d'env sur Render
-const TURNSTILE_SECRET = process.env.TURNSTILE_SECRET || "";
+// ==================== LOGGING SÉCURITÉ ====================
+const LOG_DIR  = path.join(__dirname, "logs");
+const LOG_FILE = path.join(LOG_DIR, "security.log");
 
-// Middlewares
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
-  credentials: true,
-  allowedHeaders: ["Content-Type", "Authorization"]
+if (!fs.existsSync(LOG_DIR)) {
+    try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (_) {}
+}
+
+function log(level, event, details = {}) {
+    const entry = JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level,
+        event,
+        ...details
+    });
+    // Affichage console
+    console.log(`[${level}] ${event}`, details);
+    // Écriture fichier (non-bloquant best-effort)
+    try { fs.appendFileSync(LOG_FILE, entry + "\n"); } catch (_) {}
+}
+
+// ==================== HELMET — EN-TÊTES DE SÉCURITÉ ====================
+app.use(helmet({
+    contentSecurityPolicy: false,   // géré côté HTML via <meta>
+    hsts: {
+        maxAge:            31536000,
+        includeSubDomains: true,
+        preload:           true
+    },
+    frameguard:     { action: "deny" },
+    noSniff:        true,
+    referrerPolicy: { policy: "strict-origin-when-cross-origin" }
 }));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-// Logging
+app.disable("x-powered-by");
+
+// ==================== CORS ====================
+const corsOptions = {
+    origin: (origin, callback) => {
+        if (!origin || ALLOWED_ORIGINS.includes("*") || ALLOWED_ORIGINS.includes(origin)) {
+            callback(null, true);
+        } else {
+            log("WARN", "cors_blocked", { origin });
+            callback(new Error("Not allowed by CORS"));
+        }
+    },
+    methods:        ["GET", "POST", "OPTIONS"],
+    credentials:    true,
+    allowedHeaders: ["Content-Type", "Authorization", "X-CSRF-Token"]
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+
+// ==================== BODY PARSING ====================
+app.use(express.json({ limit: "10kb" }));
+app.use(express.urlencoded({ extended: true, limit: "10kb" }));
+
+// ==================== LOGGING DES REQUÊTES ====================
 app.use((req, res, next) => {
-  console.log(`📨 ${new Date().toISOString()} - ${req.method} ${req.path}`);
-  next();
+    log("INFO", "request", { method: req.method, path: req.path, ip: req.ip });
+    next();
 });
+
+// ==================== RATE LIMITERS ====================
+
+const globalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 min
+    max: 200,
+    standardHeaders: true,
+    legacyHeaders:   false,
+    handler: (req, res) => {
+        log("WARN", "rate_limit_global", { ip: req.ip, path: req.path });
+        res.status(429).json({ error: "Trop de requêtes. Réessayez plus tard." });
+    }
+});
+
+// /verify-captcha : max 10 / minute
+const captchaLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders:   false,
+    handler: (req, res) => {
+        log("WARN", "rate_limit_captcha", { ip: req.ip });
+        res.status(429).json({ error: "Trop de tentatives de vérification captcha." });
+    }
+});
+
+// /validate-register : max 3 / heure
+const registerLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 3,
+    standardHeaders: true,
+    legacyHeaders:   false,
+    handler: (req, res) => {
+        log("WARN", "rate_limit_register", { ip: req.ip });
+        res.status(429).json({ error: "Trop de tentatives d'inscription. Réessayez dans 1 heure." });
+    }
+});
+
+// /validate-login : max 5 / 15 min
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders:   false,
+    handler: (req, res) => {
+        log("WARN", "rate_limit_login", { ip: req.ip });
+        res.status(429).json({ error: "Trop de tentatives de connexion. Réessayez dans 15 minutes." });
+    }
+});
+
+app.use(globalLimiter);
+
+// ==================== VALIDATION ====================
+// Mot de passe : 8 chars min, 1 majuscule, 1 chiffre, 1 caractère spécial
+const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[^a-zA-Z0-9]).{8,}$/;
+
+function validateEmail(email) {
+    if (!email || typeof email !== "string") return false;
+    return validator.isEmail(email.trim());
+}
+
+function validatePassword(password) {
+    if (!password || typeof password !== "string") return false;
+    return PASSWORD_REGEX.test(password);
+}
+
+// ==================== CSRF — NONCES À USAGE UNIQUE ====================
+// Le frontend appelle GET /api/csrf-nonce pour obtenir un nonce,
+// puis le renvoie dans le body de /verify-captcha et /validate-register.
+// Chaque nonce est valide 5 minutes et consommable une seule fois.
+const csrfNonces = new Map(); // Map<nonce, { expiresAt: number }>
+
+function generateCsrfNonce() {
+    const nonce = crypto.randomBytes(32).toString("hex");
+    csrfNonces.set(nonce, { expiresAt: Date.now() + 5 * 60 * 1000 });
+    return nonce;
+}
+
+function consumeCsrfNonce(nonce) {
+    if (!nonce || !csrfNonces.has(nonce)) return false;
+    const entry = csrfNonces.get(nonce);
+    csrfNonces.delete(nonce); // usage unique — supprimé immédiatement
+    return Date.now() < entry.expiresAt;
+}
+
+// Nettoyage périodique des nonces expirés (toutes les 10 min)
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, val] of csrfNonces) {
+        if (now > val.expiresAt) csrfNonces.delete(key);
+    }
+}, 10 * 60 * 1000);
 
 // ==================== ÉTAT DU SERVEUR ====================
 let users = 0;
-let chatMessages = []; // Stockage en mémoire des 100 derniers messages
-const MAX_MESSAGES = 100;
-const connectedUsers = new Map(); // Map<socketId, {pseudo, socketId}>
+let chatMessages = [];
+const MAX_MESSAGES   = 100;
+const connectedUsers = new Map();
 
-// ==================== SOCKET.IO - USERS & CHAT ====================
+// ==================== SOCKET.IO ====================
 io.on("connection", (socket) => {
-  users++;
-  console.log(`👤 Utilisateur connecté. Total: ${users} | Socket ID: ${socket.id}`);
-  
-  // Envoyer le nombre d'utilisateurs à tous
-  io.emit("users", users);
-  
-  // Envoyer l'historique des messages au nouveau connecté
-  socket.emit("chat:history", chatMessages);
-  
-  // ===== ÉVÉNEMENT: USER SE CONNECTE AU CHAT AVEC SON PSEUDO =====
-  socket.on("chat:join", (data) => {
-    if (data && data.pseudo) {
-      connectedUsers.set(socket.id, {
-        pseudo: data.pseudo,
-        socketId: socket.id
-      });
-      console.log(`💬 ${data.pseudo} a rejoint le chat`);
-      
-      // Message système: utilisateur a rejoint
-      const systemMessage = {
-        id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        pseudo: "SYSTEM",
-        content: `${data.pseudo} a rejoint le chat`,
-        created_at: new Date().toISOString(),
-        isSystem: true
-      };
-      
-      chatMessages.push(systemMessage);
-      if (chatMessages.length > MAX_MESSAGES) {
-        chatMessages.shift();
-      }
-      
-      io.emit("chat:message", systemMessage);
-    }
-  });
-  
-  // ===== ÉVÉNEMENT: RECEVOIR UN NOUVEAU MESSAGE =====
-  socket.on("chat:send", (data) => {
-    console.log(`💬 Message reçu de ${data.pseudo}: ${data.content.substring(0, 50)}...`);
-    
-    // Valider le message
-    if (!data.pseudo || !data.content) {
-      socket.emit("chat:error", { message: "Pseudo et contenu requis" });
-      return;
-    }
-    
-    if (data.content.trim().length === 0) {
-      socket.emit("chat:error", { message: "Le message ne peut pas être vide" });
-      return;
-    }
-    
-    if (data.content.length > 1000) {
-      socket.emit("chat:error", { message: "Message trop long (max 1000 caractères)" });
-      return;
-    }
-    
-    // Créer l'objet message
-    const message = {
-      id: data.id || `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      pseudo: data.pseudo,
-      content: data.content,
-      created_at: new Date().toISOString()
-    };
-    
-    // Ajouter aux messages en mémoire
-    chatMessages.push(message);
-    
-    // Garder seulement les 100 derniers messages
-    if (chatMessages.length > MAX_MESSAGES) {
-      chatMessages.shift();
-    }
-    
-    // Diffuser à tous les clients connectés
-    io.emit("chat:message", message);
-    
-    console.log(`✅ Message diffusé à ${users} utilisateur(s)`);
-  });
-  
-  // ===== ÉVÉNEMENT: UTILISATEUR TAPE (typing indicator) =====
-  socket.on("chat:typing", (data) => {
-    socket.broadcast.emit("chat:userTyping", {
-      pseudo: data.pseudo,
-      isTyping: data.isTyping
-    });
-  });
-  
-  // ===== ÉVÉNEMENT: DÉCONNEXION =====
-  socket.on("disconnect", () => {
-    users--;
-    
-    // Récupérer le pseudo de l'utilisateur déconnecté
-    const user = connectedUsers.get(socket.id);
-    if (user) {
-      console.log(`👋 ${user.pseudo} déconnecté. Total: ${users}`);
-      
-      // Message système: utilisateur a quitté
-      const systemMessage = {
-        id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        pseudo: "SYSTEM",
-        content: `${user.pseudo} a quitté le chat`,
-        created_at: new Date().toISOString(),
-        isSystem: true
-      };
-      
-      chatMessages.push(systemMessage);
-      if (chatMessages.length > MAX_MESSAGES) {
-        chatMessages.shift();
-      }
-      
-      io.emit("chat:message", systemMessage);
-      
-      // Supprimer de la map
-      connectedUsers.delete(socket.id);
-    } else {
-      console.log(`👋 Utilisateur déconnecté. Total: ${users}`);
-    }
-    
+    users++;
+    log("INFO", "socket_connect", { socketId: socket.id, total: users });
     io.emit("users", users);
-  });
+    socket.emit("chat:history", chatMessages);
+
+    socket.on("chat:join", (data) => {
+        if (data && typeof data.pseudo === "string" && data.pseudo.trim().length > 0) {
+            const pseudo = data.pseudo.trim().substring(0, 50);
+            connectedUsers.set(socket.id, { pseudo, socketId: socket.id });
+            log("INFO", "chat_join", { pseudo });
+            const msg = {
+                id: `msg_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
+                pseudo: "SYSTEM",
+                content: `${pseudo} a rejoint le chat`,
+                created_at: new Date().toISOString(),
+                isSystem: true
+            };
+            chatMessages.push(msg);
+            if (chatMessages.length > MAX_MESSAGES) chatMessages.shift();
+            io.emit("chat:message", msg);
+        }
+    });
+
+    socket.on("chat:send", (data) => {
+        if (!data.pseudo || typeof data.pseudo !== "string" ||
+            !data.content || typeof data.content !== "string") {
+            socket.emit("chat:error", { message: "Pseudo et contenu requis" });
+            return;
+        }
+        const content = data.content.trim();
+        if (content.length === 0) {
+            socket.emit("chat:error", { message: "Le message ne peut pas être vide" });
+            return;
+        }
+        if (content.length > 1000) {
+            socket.emit("chat:error", { message: "Message trop long (max 1000 caractères)" });
+            return;
+        }
+        const message = {
+            id: data.id || `msg_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
+            pseudo: String(data.pseudo).substring(0, 50),
+            content,
+            created_at: new Date().toISOString()
+        };
+        chatMessages.push(message);
+        if (chatMessages.length > MAX_MESSAGES) chatMessages.shift();
+        io.emit("chat:message", message);
+    });
+
+    socket.on("chat:typing", (data) => {
+        if (data && typeof data.pseudo === "string") {
+            socket.broadcast.emit("chat:userTyping", {
+                pseudo:   String(data.pseudo).substring(0, 50),
+                isTyping: Boolean(data.isTyping)
+            });
+        }
+    });
+
+    socket.on("disconnect", () => {
+        users--;
+        const user = connectedUsers.get(socket.id);
+        if (user) {
+            log("INFO", "socket_disconnect", { pseudo: user.pseudo, total: users });
+            const msg = {
+                id: `msg_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
+                pseudo: "SYSTEM",
+                content: `${user.pseudo} a quitté le chat`,
+                created_at: new Date().toISOString(),
+                isSystem: true
+            };
+            chatMessages.push(msg);
+            if (chatMessages.length > MAX_MESSAGES) chatMessages.shift();
+            io.emit("chat:message", msg);
+            connectedUsers.delete(socket.id);
+        }
+        io.emit("users", users);
+    });
 });
 
-// ==================== ROUTES API ====================
+// ==================== ROUTES ====================
 
-// Route racine (pour Render health checks)
-app.get("/", (req, res) => {
-  res.redirect("/test");
-});
+app.get("/favicon.ico", (req, res) => res.status(204).end());
 
-// Favicon (évite les erreurs 404)
-app.get("/favicon.ico", (req, res) => {
-  res.status(204).end();
-});
-
-// Health check
 app.get("/health", (req, res) => {
-  console.log("✅ Health check");
-  res.json({ 
-    status: "ok",
-    timestamp: new Date().toISOString()
-  });
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// Route de status
-app.get("/api/status", (req, res) => {
-  res.json({
-    status: "online",
-    onlineUsers: users,
-    totalMessages: chatMessages.length,
-    timestamp: new Date().toISOString()
-  });
+// ---- CSRF nonce — appelé par le frontend avant toute opération sensible ----
+app.get("/api/csrf-nonce", (req, res) => {
+    const nonce = generateCsrfNonce();
+    res.json({ nonce });
 });
 
-// API: Récupérer l'historique du chat
-app.get("/api/chat/messages", (req, res) => {
-  const limit = parseInt(req.query.limit) || 50;
-  const messages = chatMessages.slice(-limit);
-  
-  res.json({
-    messages: messages,
-    total: messages.length,
-    timestamp: new Date().toISOString()
-  });
-});
+// ---- Vérification captcha Turnstile (avec validation réelle Cloudflare) ----
+app.post("/verify-captcha", captchaLimiter, async (req, res) => {
+    const { token, csrfNonce } = req.body;
 
-// API: Statistiques du chat
-app.get("/api/chat/stats", (req, res) => {
-  res.json({
-    totalMessages: chatMessages.length,
-    onlineUsers: users,
-    connectedUsers: Array.from(connectedUsers.values()).map(u => u.pseudo),
-    timestamp: new Date().toISOString()
-  });
-});
-
-// API: Stats dashboard (lignes indexées, recherches, etc.)
-app.get("/api/stats/dashboard", (req, res) => {
-  res.json({
-    indexedLines: "1.9B",
-    totalSearches: "4.2M",
-    registeredUsers: "106.6K",
-    timestamp: new Date().toISOString()
-  });
-});
-
-// ══════════════════════════════════════════════════════════════════
-//  VÉRIFICATION CAPTCHA TURNSTILE
-//  Appelé par register.html avant la création de compte Supabase
-//  POST /verify-captcha
-//  Body  : { token: string }
-//  Retour: { success: bool, message?: string }
-// ══════════════════════════════════════════════════════════════════
-app.post("/verify-captcha", async (req, res) => {
-  const { token } = req.body;
-
-  if (!token || typeof token !== "string" || token.length > 2048) {
-    return res.status(400).json({ success: false, message: "Token manquant ou invalide" });
-  }
-
-  // Mode dev: si le secret n'est pas configuré on laisse passer
-  if (!TURNSTILE_SECRET) {
-    console.warn("⚠️ [CAPTCHA] TURNSTILE_SECRET absent — vérification ignorée (mode dev)");
-    return res.json({ success: true });
-  }
-
-  try {
-    const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
-
-    const formBody = new URLSearchParams({
-      secret: TURNSTILE_SECRET,
-      response: token,
-      remoteip: ip
-    });
-
-    const cfRes = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
-      method: "POST",
-      body: formBody
-    });
-
-    const data = await cfRes.json();
-    console.log(`🔒 [CAPTCHA] success=${data.success} | ip=${ip}`);
-
-    if (!data.success) {
-      return res.status(400).json({ success: false, message: "Captcha invalide, veuillez réessayer" });
+    if (!consumeCsrfNonce(csrfNonce)) {
+        log("WARN", "csrf_invalid_captcha", { ip: req.ip });
+        return res.status(403).json({ success: false, message: "Requête invalide (CSRF)" });
     }
 
+    if (!token || typeof token !== "string") {
+        log("WARN", "captcha_token_missing", { ip: req.ip });
+        return res.status(400).json({ success: false, message: "Token captcha manquant" });
+    }
+
+    if (!TURNSTILE_SECRET) {
+        log("ERROR", "captcha_secret_not_configured");
+        return res.status(500).json({ success: false, message: "Configuration serveur incomplète" });
+    }
+
+    try {
+        const formData = new URLSearchParams();
+        formData.append("secret",   TURNSTILE_SECRET);
+        formData.append("response", token);
+        formData.append("remoteip", req.ip);
+
+        const cfRes  = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+            method:  "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body:    formData.toString()
+        });
+        const cfData = await cfRes.json();
+
+        if (!cfData.success) {
+            log("WARN", "captcha_invalid", { ip: req.ip, errors: cfData["error-codes"] });
+            return res.status(400).json({ success: false, message: "Captcha invalide. Veuillez réessayer." });
+        }
+
+        log("INFO", "captcha_ok", { ip: req.ip });
+        res.json({ success: true });
+
+    } catch (err) {
+        log("ERROR", "captcha_fetch_failed", { error: err.message });
+        res.status(500).json({ success: false, message: "Erreur lors de la vérification du captcha" });
+    }
+});
+
+// ---- Validation côté serveur avant inscription Supabase ----
+app.post("/validate-register", registerLimiter, (req, res) => {
+    const { email, password, csrfNonce } = req.body;
+
+    if (!consumeCsrfNonce(csrfNonce)) {
+        log("WARN", "csrf_invalid_register", { ip: req.ip });
+        return res.status(403).json({ success: false, message: "Requête invalide (CSRF)" });
+    }
+    if (!validateEmail(email)) {
+        log("WARN", "register_bad_email", { ip: req.ip });
+        return res.status(400).json({ success: false, message: "Email invalide" });
+    }
+    if (!validatePassword(password)) {
+        log("WARN", "register_weak_password", { ip: req.ip });
+        return res.status(400).json({
+            success: false,
+            message: "Mot de passe insuffisant (8 min, 1 majuscule, 1 chiffre, 1 symbole)"
+        });
+    }
+
+    log("INFO", "register_validated", { ip: req.ip });
     res.json({ success: true });
-
-  } catch (err) {
-    console.error("❌ [CAPTCHA] Erreur:", err.message);
-    res.status(500).json({ success: false, message: "Erreur serveur lors de la vérification" });
-  }
 });
 
-// Route de test avec info complète
-app.get("/test", (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Backend Rapace</title>
-      <style>
-        body { 
-          font-family: monospace; 
-          padding: 2rem; 
-          background: #0a0a0f; 
-          color: #00ff00; 
-          max-width: 900px;
-          margin: 0 auto;
-        }
-        h1 { color: #00ff00; border-bottom: 2px solid #00ff00; padding-bottom: 1rem; }
-        .info { color: #00aaff; margin: 0.5rem 0; }
-        .success { color: #00ff00; font-weight: bold; }
-        .warning { color: #fbbf24; font-weight: bold; }
-        ul { margin: 1rem 0; }
-        li { margin: 0.5rem 0; }
-        .endpoint {
-          background: #1a1a1a;
-          padding: 0.75rem;
-          border-left: 3px solid #00ff00;
-          margin: 0.5rem 0;
-          border-radius: 4px;
-        }
-        .method {
-          color: #fbbf24;
-          font-weight: bold;
-          margin-right: 0.5rem;
-        }
-        code {
-          background: #0a0a0a;
-          padding: 0.2rem 0.4rem;
-          border-radius: 3px;
-          color: #10b981;
-        }
-        .section {
-          margin: 2rem 0;
-          padding: 1rem;
-          background: #1a1a1a;
-          border-radius: 8px;
-          border: 1px solid #333;
-        }
-      </style>
-    </head>
-    <body>
-      <h1 class="success">✅ Backend Rapace Opérationnel!</h1>
-      <p class="info">🕐 ${new Date().toISOString()}</p>
-      <p class="info">📍 Port: ${PORT}</p>
-      <p class="info">👥 Utilisateurs en ligne: ${users}</p>
-      <p class="info">💬 Messages en mémoire: ${chatMessages.length}/${MAX_MESSAGES}</p>
-      <p class="info">🔒 Captcha: ${TURNSTILE_SECRET ? "CONFIGURÉ ✅" : "NON CONFIGURÉ (dev mode) ⚠️"}</p>
-      
-      <div class="section">
-        <h2>📡 Endpoints Standards:</h2>
-        <ul>
-          <li class="endpoint"><span class="method">GET</span> <code>/</code> — Redirection vers /test</li>
-          <li class="endpoint"><span class="method">GET</span> <code>/health</code> — Health check Render</li>
-          <li class="endpoint"><span class="method">GET</span> <code>/api/status</code> — Statut + users en ligne</li>
-        </ul>
-      </div>
-
-      <div class="section">
-        <h2>🔒 Endpoint Captcha:</h2>
-        <ul>
-          <li class="endpoint">
-            <span class="method">POST</span> <code>/verify-captcha</code><br>
-            Body: <code>{ token: string }</code><br>
-            Réponse: <code>{ success: bool, message?: string }</code><br>
-            Variable env requise: <code>TURNSTILE_SECRET</code>
-          </li>
-        </ul>
-      </div>
-
-      <div class="section">
-        <h2>💬 Endpoints Chat:</h2>
-        <ul>
-          <li class="endpoint"><span class="method">GET</span> <code>/api/chat/messages?limit=50</code><br>→ Récupérer l'historique des messages</li>
-          <li class="endpoint"><span class="method">GET</span> <code>/api/chat/stats</code><br>→ Statistiques du chat</li>
-        </ul>
-      </div>
-
-      <div class="section">
-        <h2>📊 Endpoints Stats:</h2>
-        <ul>
-          <li class="endpoint"><span class="method">GET</span> <code>/api/stats/dashboard</code><br>→ Stats globales</li>
-        </ul>
-      </div>
-
-      <div class="section">
-        <h2>🔌 Socket.IO Events:</h2>
-        <h3>📤 Émis par le client:</h3>
-        <ul>
-          <li class="endpoint"><code>chat:join</code> — <code>{ pseudo: "username" }</code></li>
-          <li class="endpoint"><code>chat:send</code> — <code>{ pseudo: "username", content: "message" }</code></li>
-          <li class="endpoint"><code>chat:typing</code> — <code>{ pseudo: "username", isTyping: true }</code></li>
-        </ul>
-        <h3>📥 Reçus par le client:</h3>
-        <ul>
-          <li class="endpoint"><code>users</code> — nombre d'utilisateurs (number)</li>
-          <li class="endpoint"><code>chat:history</code> — historique à la connexion (Array)</li>
-          <li class="endpoint"><code>chat:message</code> — <code>{ id, pseudo, content, created_at, isSystem? }</code></li>
-          <li class="endpoint"><code>chat:userTyping</code> — <code>{ pseudo, isTyping }</code></li>
-          <li class="endpoint"><code>chat:error</code> — <code>{ message }</code></li>
-        </ul>
-      </div>
-
-      <div class="section">
-        <h2 class="warning">⚙️ Config Render — Variables d'environnement:</h2>
-        <ul>
-          <li class="endpoint"><code>TURNSTILE_SECRET</code> — Secret Cloudflare Turnstile (obligatoire en prod)</li>
-          <li class="endpoint"><code>NODE_ENV</code> — production</li>
-          <li class="endpoint"><code>PORT</code> — défini automatiquement par Render</li>
-        </ul>
-      </div>
-
-      <h2 class="success">✅ Serveur prêt à l'emploi!</h2>
-    </body>
-    </html>
-  `);
+// ---- Pré-validation login (rate limiting + format email) ----
+app.post("/validate-login", loginLimiter, (req, res) => {
+    const { email } = req.body;
+    if (!validateEmail(email)) {
+        log("WARN", "login_bad_email", { ip: req.ip });
+        // Message volontairement générique
+        return res.status(400).json({ success: false, message: "Identifiants incorrects" });
+    }
+    log("INFO", "login_attempt", { ip: req.ip });
+    res.json({ success: true });
 });
 
-// 404 handler
+// ---- Routes API existantes ----
+app.get("/api/status", (req, res) => {
+    res.json({ status: "online", onlineUsers: users, totalMessages: chatMessages.length, timestamp: new Date().toISOString() });
+});
+
+app.get("/api/chat/messages", (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+    res.json({ messages: chatMessages.slice(-limit), total: chatMessages.slice(-limit).length, timestamp: new Date().toISOString() });
+});
+
+app.get("/api/chat/stats", (req, res) => {
+    res.json({
+        totalMessages: chatMessages.length,
+        onlineUsers:   users,
+        connectedUsers: Array.from(connectedUsers.values()).map(u => u.pseudo),
+        timestamp: new Date().toISOString()
+    });
+});
+
+app.get("/api/stats/dashboard", (req, res) => {
+    res.json({ indexedLines: "1.9B", totalSearches: "4.2M", registeredUsers: "106.6K", timestamp: new Date().toISOString() });
+});
+
+app.get("/", (req, res) => res.redirect("/health"));
+
+// 404
 app.use((req, res) => {
-  console.log(`❌ Route non trouvée: ${req.method} ${req.path}`);
-  res.status(404).json({ 
-    error: "Route non trouvée",
-    path: req.path,
-    method: req.method
-  });
+    log("WARN", "not_found", { method: req.method, path: req.path, ip: req.ip });
+    res.status(404).json({ error: "Route non trouvée" });
+});
+
+// Erreur globale
+app.use((err, req, res, _next) => {
+    log("ERROR", "unhandled_error", { message: err.message });
+    res.status(500).json({ error: "Erreur interne du serveur" });
 });
 
 // ==================== DÉMARRAGE ====================
 server.listen(PORT, () => {
-  console.log("\n" + "=".repeat(70));
-  console.log("🚀 SERVEUR RAPACE DÉMARRÉ");
-  console.log("=".repeat(70));
-  console.log(`📍 Port: ${PORT}`);
-  console.log(`🌐 URL: https://snkjb325pihjxj1bjxbowny.onrender.com`);
-  console.log(`🌍 CORS: Accepte toutes les origines`);
-  console.log(`📊 WebSocket: Compteur utilisateurs activé`);
-  console.log(`💬 Chat: Système Socket.io activé`);
-  console.log(`📝 Historique: ${MAX_MESSAGES} messages max en mémoire`);
-  console.log(`🔒 Captcha: ${TURNSTILE_SECRET ? "CONFIGURÉ" : "NON CONFIGURÉ (set TURNSTILE_SECRET)"}`);
-  console.log("=".repeat(70) + "\n");
-  console.log("✅ Prêt à recevoir des requêtes!\n");
+    log("INFO", "server_start", { port: PORT });
+    console.log("\n" + "=".repeat(60));
+    console.log("🚀 SERVEUR RAPACE DÉMARRÉ");
+    console.log(`📍 Port          : ${PORT}`);
+    console.log(`🔒 HSTS          : activé (1 an)`);
+    console.log(`🛡  Rate limiting : /login(5/15min) /register(3/h) /captcha(10/min)`);
+    console.log(`✅ Turnstile     : vérification réelle Cloudflare`);
+    console.log(`🔑 CSRF nonces   : usage unique, expiration 5min`);
+    console.log(`📋 Logs          : ${LOG_FILE}`);
+    console.log("=".repeat(60) + "\n");
 });
