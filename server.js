@@ -21,6 +21,7 @@ const ALLOWED_ORIGINS  = (process.env.ALLOWED_ORIGINS || "")
     .split(",").map(s => s.trim()).filter(Boolean);
 const SUPABASE_URL         = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
+const SEEKNOW_API_KEY      = process.env.SEEKNOW_API_KEY || "";
 const supabaseAdmin = (SUPABASE_URL && SUPABASE_SERVICE_KEY)
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } })
     : null;
@@ -94,6 +95,7 @@ const loginLimiter       = mkLimiter(15 * 60 * 1000,  5, "Trop de tentatives.");
 const statsLimiter       = mkLimiter(60 * 1000,       30, "Trop de requêtes stats.");
 const maintenanceLimiter = mkLimiter(60 * 1000,       60, "Trop de requêtes maintenance.");
 const logLimiter         = mkLimiter(60 * 1000,       30, "Trop de requêtes log.");
+const searchLimiter      = mkLimiter(60 * 1000,       20, "Trop de requêtes de recherche.");
 
 // ==================== AUTH MIDDLEWARE ====================
 async function requireAuth(req, res, next) {
@@ -365,6 +367,47 @@ app.post("/validate-login", loginLimiter, (req, res) => {
     if (!consumeCsrfNonce(csrfNonce)) return res.status(403).json({ success: false, message: "CSRF invalide" });
     if (!validateEmail(email))         return res.status(400).json({ success: false, message: "Identifiants incorrects" });
     res.json({ success: true });
+});
+
+// ==================== SEEKNOW SEARCH ====================
+const VALID_SEARCH_TYPES = new Set(["email","username","phone","ip","domain","name","hash","auto"]);
+
+app.post("/api/search", requireAuth, searchLimiter, async (req, res) => {
+    if (!SEEKNOW_API_KEY) {
+        log("ERROR", "seeknow_missing_key", { ip: req.ip });
+        return res.status(503).json({ error: "Service de recherche non configuré." });
+    }
+    const { query, type = "auto" } = req.body;
+    if (!query || typeof query !== "string" || query.trim().length < 2) {
+        return res.status(400).json({ error: "Paramètre 'query' invalide (2 caractères minimum)." });
+    }
+    if (!VALID_SEARCH_TYPES.has(type)) {
+        return res.status(400).json({ error: "Type de recherche invalide." });
+    }
+    const sanitizedQuery = query.trim().substring(0, 300);
+    const start = Date.now();
+    try {
+        const skRes = await fetch("https://see-know.eu/api/v1/search", {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${SEEKNOW_API_KEY}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ query: sanitizedQuery, type, limit: 100 })
+        });
+        const responseTime = Date.now() - start;
+        if (!skRes.ok) {
+            const errText = await skRes.text().catch(() => "");
+            log("WARN", "seeknow_api_error", { status: skRes.status, ip: req.ip, uid: req.user?.id });
+            return res.status(skRes.status >= 500 ? 502 : skRes.status).json({ error: "Erreur API SeeKnow.", detail: skRes.status });
+        }
+        const data = await skRes.json();
+        log("INFO", "seeknow_search", { uid: req.user?.id, ip: req.ip, type, total: data.total, ms: responseTime });
+        res.json({ ...data, responseTime });
+    } catch (e) {
+        log("ERROR", "seeknow_fetch_fail", { msg: e.message, ip: req.ip });
+        res.status(502).json({ error: "Impossible de joindre l'API SeeKnow." });
+    }
 });
 
 app.use((req, res) => res.status(404).json({ error: "Route non trouvée" }));
