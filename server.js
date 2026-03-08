@@ -22,6 +22,7 @@ const ALLOWED_ORIGINS  = (process.env.ALLOWED_ORIGINS || "")
 const SUPABASE_URL         = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const SEEKNOW_API_KEY      = process.env.SEEKNOW_API_KEY || "";
+const WEBHOOK_URL          = process.env.WEBHOOK_URL || "";
 const supabaseAdmin = (SUPABASE_URL && SUPABASE_SERVICE_KEY)
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } })
     : null;
@@ -366,6 +367,68 @@ app.post("/validate-login", loginLimiter, (req, res) => {
     const { email, csrfNonce } = req.body;
     if (!consumeCsrfNonce(csrfNonce)) return res.status(403).json({ success: false, message: "CSRF invalide" });
     if (!validateEmail(email))         return res.status(400).json({ success: false, message: "Identifiants incorrects" });
+    res.json({ success: true });
+});
+
+
+// ==================== NOTIFICATION ROUTES ====================
+const notifyLimiter = mkLimiter(60 * 1000, 10, "Trop de notifications.");
+
+async function sendWebhook(payload) {
+    if (!WEBHOOK_URL) return;
+    try {
+        await fetch(WEBHOOK_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+    } catch (e) {
+        log("WARN", "webhook_fail", { msg: e.message });
+    }
+}
+
+// Notif inscription — appelé par le frontend après signUp réussi
+app.post("/api/notify-register", notifyLimiter, async (req, res) => {
+    const { email } = req.body;
+    if (!email || typeof email !== "string" || !validateEmail(email)) {
+        return res.status(400).json({ error: "Email invalide" });
+    }
+    const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip;
+    log("INFO", "new_register", { email: sanitize(email, 254), ip });
+    await sendWebhook({
+        embeds: [{
+            title: "🆕 Nouvelle inscription",
+            color: 0x22c55e,
+            fields: [
+                { name: "Email", value: sanitize(email, 254), inline: true },
+                { name: "IP", value: ip, inline: true },
+                { name: "Date", value: new Date().toLocaleString("fr-FR"), inline: false }
+            ]
+        }]
+    });
+    res.json({ success: true });
+});
+
+// Notif connexion — appelé par le frontend après signIn réussi
+app.post("/api/notify-login", requireAuth, notifyLimiter, async (req, res) => {
+    const { email } = req.body;
+    if (!email || typeof email !== "string" || !validateEmail(email)) {
+        return res.status(400).json({ error: "Email invalide" });
+    }
+    const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip;
+    log("INFO", "user_login", { uid: req.user?.id, email: sanitize(email, 254), ip });
+    await sendWebhook({
+        embeds: [{
+            title: "🔐 Connexion utilisateur",
+            color: 0x60a5fa,
+            fields: [
+                { name: "Email", value: sanitize(email, 254), inline: true },
+                { name: "IP", value: ip, inline: true },
+                { name: "UID", value: req.user?.id || "—", inline: false },
+                { name: "Date", value: new Date().toLocaleString("fr-FR"), inline: false }
+            ]
+        }]
+    });
     res.json({ success: true });
 });
 
