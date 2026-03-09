@@ -16,14 +16,17 @@ app.set("trust proxy", 1);
 
 // ==================== CONFIG ====================
 const PORT             = process.env.PORT || 3000;
-const TURNSTILE_SECRET = process.env.TURNSTILE_SECRET || "";
-const ALLOWED_ORIGINS  = (process.env.ALLOWED_ORIGINS || "")
+
+// ⚠️  Remplace les valeurs ci-dessous par tes vraies clefs
+const TURNSTILE_SECRET     = process.env.TURNSTILE_SECRET     || "TON_TURNSTILE_SECRET_ICI";
+const SUPABASE_URL         = process.env.SUPABASE_URL         || "https://ohmkqlouiepzkbyztnsm.supabase.co";
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "TON_SUPABASE_SERVICE_KEY_ICI";
+const SEEKNOW_API_KEY      = process.env.SEEKNOW_API_KEY      || "seek-2dc1ec0c97a74d7eb57fe57cbc1da69dbd54aeae0c795e2c";
+const WEBHOOK_URL          = process.env.WEBHOOK_URL          || "TON_WEBHOOK_DISCORD_ICI";
+const ALLOWED_ORIGINS      = (process.env.ALLOWED_ORIGINS || "https://searchlabs.pages.dev")
     .split(",").map(s => s.trim()).filter(Boolean);
-const SUPABASE_URL         = process.env.SUPABASE_URL || "";
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
-const SEEKNOW_API_KEY      = process.env.SEEKNOW_API_KEY || "";
-const WEBHOOK_URL          = process.env.WEBHOOK_URL || "";
-const supabaseAdmin = (SUPABASE_URL && SUPABASE_SERVICE_KEY)
+
+const supabaseAdmin = (SUPABASE_URL && SUPABASE_SERVICE_KEY && !SUPABASE_SERVICE_KEY.includes("ICI"))
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } })
     : null;
 
@@ -102,7 +105,6 @@ const searchLimiter      = mkLimiter(60 * 1000,       20, "Trop de requêtes de 
 async function requireAuth(req, res, next) {
     const auth = req.headers["authorization"];
     if (!auth?.startsWith("Bearer ")) return res.status(401).json({ error: "Non authentifié" });
-    // Si supabaseAdmin pas dispo (env vars manquants) → laisse passer en dev
     if (!supabaseAdmin) { log("WARN", "auth_skipped_no_client"); return next(); }
     try {
         const { data: { user }, error } = await supabaseAdmin.auth.getUser(auth.slice(7));
@@ -316,7 +318,7 @@ app.post("/api/admin/maintenance", requireAdmin, maintenanceLimiter, async (req,
     } catch (e) { log("ERROR", "mnt_fail", { msg: e.message }); res.status(500).json({ error: "Erreur mise à jour" }); }
 });
 
-// Log sécurité — sans auth (pour capturer les login échoués)
+// Log sécurité
 app.post("/api/log-event", logLimiter, async (req, res) => {
     const { action_type, action_description, user_id } = req.body;
     if (!action_type || typeof action_type !== "string") return res.status(400).json({ error: "action_type requis" });
@@ -332,7 +334,7 @@ app.post("/api/log-event", logLimiter, async (req, res) => {
     } catch (_) { res.json({ success: true }); }
 });
 
-// Stats — nécessite auth
+// Stats
 app.get("/api/stats/dashboard", requireAuth, statsLimiter, (req, res) => {
     res.json({ ...statsCache, timestamp: new Date().toISOString() });
 });
@@ -343,7 +345,7 @@ app.post("/verify-captcha", captchaLimiter, async (req, res) => {
     if (!consumeCsrfNonce(csrfNonce))       return res.status(403).json({ success: false, message: "CSRF invalide" });
     if (!token || typeof token !== "string") return res.status(400).json({ success: false, message: "Token manquant" });
     if (token.length > 2048)                return res.status(400).json({ success: false, message: "Token invalide" });
-    if (!TURNSTILE_SECRET)                  return res.status(500).json({ success: false, message: "Config incomplète" });
+    if (!TURNSTILE_SECRET || TURNSTILE_SECRET.includes("ICI")) return res.status(500).json({ success: false, message: "Config incomplète" });
     try {
         const form = new URLSearchParams();
         form.append("secret", TURNSTILE_SECRET); form.append("response", token); form.append("remoteip", req.ip);
@@ -370,12 +372,11 @@ app.post("/validate-login", loginLimiter, (req, res) => {
     res.json({ success: true });
 });
 
-
 // ==================== NOTIFICATION ROUTES ====================
 const notifyLimiter = mkLimiter(60 * 1000, 10, "Trop de notifications.");
 
 async function sendWebhook(payload) {
-    if (!WEBHOOK_URL) return;
+    if (!WEBHOOK_URL || WEBHOOK_URL.includes("ICI")) return;
     try {
         await fetch(WEBHOOK_URL, {
             method: "POST",
@@ -387,7 +388,6 @@ async function sendWebhook(payload) {
     }
 }
 
-// Notif inscription — appelé par le frontend après signUp réussi
 app.post("/api/notify-register", notifyLimiter, async (req, res) => {
     const { email } = req.body;
     if (!email || typeof email !== "string" || !validateEmail(email)) {
@@ -409,7 +409,6 @@ app.post("/api/notify-register", notifyLimiter, async (req, res) => {
     res.json({ success: true });
 });
 
-// Notif connexion — appelé par le frontend après signIn réussi
 app.post("/api/notify-login", requireAuth, notifyLimiter, async (req, res) => {
     const { email } = req.body;
     if (!email || typeof email !== "string" || !validateEmail(email)) {
@@ -436,9 +435,9 @@ app.post("/api/notify-login", requireAuth, notifyLimiter, async (req, res) => {
 const VALID_SEARCH_TYPES = new Set(["email","username","phone","ip","domain","name","hash","auto"]);
 
 app.post("/api/search", requireAuth, searchLimiter, async (req, res) => {
-    if (!SEEKNOW_API_KEY) {
+    if (!SEEKNOW_API_KEY || SEEKNOW_API_KEY.includes("ICI")) {
         log("ERROR", "seeknow_missing_key", { ip: req.ip });
-        return res.status(503).json({ error: "Service de recherche non configuré." });
+        return res.status(503).json({ error: "Service de recherche non configuré. Ajoutez SEEKNOW_API_KEY." });
     }
     const { query, type = "auto" } = req.body;
     if (!query || typeof query !== "string" || query.trim().length < 2) {
@@ -460,7 +459,6 @@ app.post("/api/search", requireAuth, searchLimiter, async (req, res) => {
         });
         const responseTime = Date.now() - start;
         if (!skRes.ok) {
-            const errText = await skRes.text().catch(() => "");
             log("WARN", "seeknow_api_error", { status: skRes.status, ip: req.ip, uid: req.user?.id });
             return res.status(skRes.status >= 500 ? 502 : skRes.status).json({ error: "Erreur API SeeKnow.", detail: skRes.status });
         }
