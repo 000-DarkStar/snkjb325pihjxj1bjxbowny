@@ -18,11 +18,11 @@ app.set("trust proxy", 1);
 const PORT             = process.env.PORT || 3000;
 
 // ⚠️  Remplace les valeurs ci-dessous par tes vraies clefs
-const TURNSTILE_SECRET     = process.env.TURNSTILE_SECRET     || "TON_TURNSTILE_SECRET_ICI";
+const TURNSTILE_SECRET     = process.env.TURNSTILE_SECRET     || "0x4AAAAAACXtOAo2YMkszq-RYglD_O_URx8";
 const SUPABASE_URL         = process.env.SUPABASE_URL         || "https://ohmkqlouiepzkbyztnsm.supabase.co";
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "TON_SUPABASE_SERVICE_KEY_ICI";
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9obWtxbG91aWVwemtieXp0bnNtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTI2ODYyMywiZXhwIjoyMDg0ODQ0NjIzfQ.Z3BNfmfoWAO1ocgCJBadxfKF_X54fF9KZQfVn0woDes";
 const SEEKNOW_API_KEY      = process.env.SEEKNOW_API_KEY      || "seek-2dc1ec0c97a74d7eb57fe57cbc1da69dbd54aeae0c795e2c";
-const WEBHOOK_URL          = process.env.WEBHOOK_URL          || "TON_WEBHOOK_DISCORD_ICI";
+const WEBHOOK_URL          = process.env.WEBHOOK_URL          || "https://ptb.discord.com/api/webhooks/1473486621973151744/1Oy02CferN_JUUkkxOLHJSPxNVVst-mgGWE51KjOBJfzYZzh32HTahznN5hfdFEEBpqo";
 const ALLOWED_ORIGINS      = (process.env.ALLOWED_ORIGINS || "https://searchlabs.pages.dev")
     .split(",").map(s => s.trim()).filter(Boolean);
 
@@ -475,3 +475,4 @@ app.use((req, res) => res.status(404).json({ error: "Route non trouvée" }));
 app.use((err, req, res, _next) => { log("ERROR", "unhandled", { msg: err.message }); res.status(500).json({ error: "Erreur interne" }); });
 
 server.listen(PORT, () => log("INFO", "server_start", { port: PORT }));
+
