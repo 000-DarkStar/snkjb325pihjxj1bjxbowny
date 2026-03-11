@@ -16,8 +16,6 @@ app.set("trust proxy", 1);
 
 // ==================== CONFIG ====================
 const PORT             = process.env.PORT || 3000;
-
-// ⚠️  Remplace les valeurs ci-dessous par tes vraies clefs
 const TURNSTILE_SECRET     = process.env.TURNSTILE_SECRET     || "0x4AAAAAACXtOAo2YMkszq-RYglD_O_URx8";
 const SUPABASE_URL         = process.env.SUPABASE_URL         || "https://ohmkqlouiepzkbyztnsm.supabase.co";
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9obWtxbG91aWVwemtieXp0bnNtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTI2ODYyMywiZXhwIjoyMDg0ODQ0NjIzfQ.Z3BNfmfoWAO1ocgCJBadxfKF_X54fF9KZQfVn0woDes";
@@ -34,6 +32,8 @@ const ADMIN_UIDS = new Set([
     "5a819614-acac-4c54-a529-d15da447a47a",
     "d834eeb8-7eb5-4c61-a46e-e3c6d7fcadae"
 ]);
+
+const VALID_PLANS = new Set(["free", "premium", "unlimited", "admin", "moderator"]);
 
 // ==================== LOGGING ====================
 const LOG_DIR  = path.join(__dirname, "logs");
@@ -100,6 +100,7 @@ const statsLimiter       = mkLimiter(60 * 1000,       30, "Trop de requêtes sta
 const maintenanceLimiter = mkLimiter(60 * 1000,       60, "Trop de requêtes maintenance.");
 const logLimiter         = mkLimiter(60 * 1000,       30, "Trop de requêtes log.");
 const searchLimiter      = mkLimiter(60 * 1000,       20, "Trop de requêtes de recherche.");
+const adminLimiter       = mkLimiter(60 * 1000,       60, "Trop de requêtes admin.");
 
 // ==================== AUTH MIDDLEWARE ====================
 async function requireAuth(req, res, next) {
@@ -145,7 +146,7 @@ async function getMnt() {
     if (_mntCache !== null && Date.now() - _mntTs < 15000) return _mntCache;
     if (!supabaseAdmin) { _mntCache = { active: false }; _mntTs = Date.now(); return _mntCache; }
     try {
-        const { data } = await supabaseAdmin.from("system_settings").select("value").eq("key", "maintenance").single();
+        const { data } = await supabaseAdmin.from("system_settings").select("value").eq("key", "maintenance").maybeSingle();
         const v = data?.value;
         _mntCache = v ? (typeof v === "string" ? JSON.parse(v) : v) : { active: false };
     } catch (_) { _mntCache = { active: false }; }
@@ -187,22 +188,38 @@ async function refreshStats() {
 refreshStats();
 setInterval(refreshStats, 5 * 60 * 1000);
 
-// ==================== SANCTIONS CACHE ====================
+// ==================== SANCTIONS CACHE (30s TTL) ====================
 const sanctionCache = new Map();
 async function getSanction(authId) {
     const cached = sanctionCache.get(authId);
     if (cached && Date.now() - cached._ts < 30000) return cached;
-    if (!supabaseAdmin) return { muted: false, banned: false, mutedUntil: null };
+    if (!supabaseAdmin) return { muted: false, banned: false, blockSearch: false, mutedUntil: null };
     try {
-        const { data: user } = await supabaseAdmin.from("users").select("id").eq("auth_id", authId).single();
-        if (!user) return { muted: false, banned: false, mutedUntil: null };
-        const { data: sanctions } = await supabaseAdmin.from("sanctions").select("type, expires_at").eq("user_id", user.id).eq("active", true).or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`);
-        const mute = sanctions?.find(s => s.type === "mute");
-        const result = { muted: !!mute, banned: !!(sanctions?.find(s => s.type === "ban")), mutedUntil: mute?.expires_at ?? null, _ts: Date.now() };
+        const { data: user } = await supabaseAdmin.from("users").select("id").eq("auth_id", authId).maybeSingle();
+        if (!user) return { muted: false, banned: false, blockSearch: false, mutedUntil: null };
+        const { data: sanctions } = await supabaseAdmin
+            .from("sanctions")
+            .select("type, expires_at")
+            .eq("user_id", user.id)
+            .eq("active", true)
+            .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`);
+        const mute        = sanctions?.find(s => s.type === "mute");
+        const ban         = sanctions?.find(s => s.type === "ban");
+        const blockSearch = sanctions?.find(s => s.type === "block_search");
+        const result = {
+            muted:       !!mute,
+            banned:      !!ban,
+            blockSearch: !!blockSearch,
+            mutedUntil:  mute?.expires_at ?? null,
+            _ts: Date.now()
+        };
         sanctionCache.set(authId, result);
         return result;
-    } catch (_) { return { muted: false, banned: false, mutedUntil: null }; }
+    } catch (_) { return { muted: false, banned: false, blockSearch: false, mutedUntil: null }; }
 }
+
+// Invalidate sanction cache for a user
+function invalidateSanction(authId) { if (authId) sanctionCache.delete(authId); }
 
 // ==================== SOCKET.IO ====================
 let onlineUsers = 0;
@@ -238,7 +255,7 @@ io.on("connection", async (socket) => {
         if (sd?.authId) {
             const s = await getSanction(sd.authId);
             if (s.banned) { socket.emit("chat:error", { message: "Votre compte est banni." }); return; }
-            if (s.muted) { socket.emit("chat:error", { message: `Vous êtes réduit au silence${s.mutedUntil ? ` jusqu'à ${new Date(s.mutedUntil).toLocaleTimeString("fr-FR")}` : ""}.` }); return; }
+            if (s.muted)  { socket.emit("chat:error", { message: `Vous êtes réduit au silence${s.mutedUntil ? ` jusqu'à ${new Date(s.mutedUntil).toLocaleTimeString("fr-FR")}` : ""}.` }); return; }
         }
         io.emit("chat:message", { id: data.id || `msg_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`, pseudo: sanitize(data.pseudo, 50), content, created_at: new Date().toISOString() });
     });
@@ -247,7 +264,11 @@ io.on("connection", async (socket) => {
         if (data && typeof data.pseudo === "string") socket.broadcast.emit("chat:userTyping", { pseudo: sanitize(data.pseudo, 50), isTyping: Boolean(data.isTyping) });
     });
 
-    socket.on("admin:invalidate", (data) => { if (data?.authId) sanctionCache.delete(data.authId); });
+    socket.on("admin:invalidate", (data) => {
+        if (data?.authId) {
+            sanctionCache.delete(data.authId);
+        }
+    });
 
     socket.on("admin:maintenance_toggle", async () => {
         const sd = connectedSockets.get(socket.id);
@@ -282,7 +303,7 @@ app.get("/health",      (req, res) => res.json({ status: "ok", timestamp: new Da
 app.get("/api/status",  (req, res) => res.json({ status: "online", onlineUsers, timestamp: new Date().toISOString() }));
 app.get("/api/csrf-nonce", (req, res) => res.json({ nonce: generateCsrfNonce() }));
 
-// Maintenance — public
+// Maintenance — public GET
 app.get("/api/maintenance", maintenanceLimiter, async (req, res) => {
     try {
         const st = await getMnt();
@@ -318,7 +339,120 @@ app.post("/api/admin/maintenance", requireAdmin, maintenanceLimiter, async (req,
     } catch (e) { log("ERROR", "mnt_fail", { msg: e.message }); res.status(500).json({ error: "Erreur mise à jour" }); }
 });
 
-// Log sécurité
+// ==================== ADMIN: SET PLAN ====================
+// Bypasses Supabase RLS using service key
+app.post("/api/admin/set-plan", requireAdmin, adminLimiter, async (req, res) => {
+    if (!supabaseAdmin) return res.status(503).json({ error: "Service indisponible" });
+    const { user_id, auth_id, plan, max_credits } = req.body;
+
+    if (!plan || !VALID_PLANS.has(String(plan).toLowerCase())) {
+        return res.status(400).json({ error: "Plan invalide. Valeurs: free, premium, unlimited, admin, moderator" });
+    }
+    if (!user_id && !auth_id) {
+        return res.status(400).json({ error: "user_id ou auth_id requis" });
+    }
+
+    const planLower = plan.toLowerCase();
+    const payload = { plan: planLower };
+    if (max_credits != null && !isNaN(parseInt(max_credits))) {
+        payload.max_credits = parseInt(max_credits);
+    }
+
+    try {
+        let updated = false;
+        let error;
+
+        // Try by auth_id first (most reliable, matches Supabase auth UUID)
+        if (auth_id) {
+            const { data, error: e1 } = await supabaseAdmin
+                .from("users").update(payload).eq("auth_id", auth_id).select("id");
+            if (!e1 && data && data.length > 0) updated = true;
+            error = e1;
+        }
+
+        // Fallback by internal id
+        if (!updated && user_id) {
+            const { data, error: e2 } = await supabaseAdmin
+                .from("users").update(payload).eq("id", user_id).select("id");
+            if (!e2 && data && data.length > 0) updated = true;
+            if (e2) error = e2;
+        }
+
+        if (!updated) {
+            return res.status(404).json({ error: "Utilisateur introuvable ou aucune ligne mise à jour" });
+        }
+
+        // Invalidate sanction cache in case plan affects search access
+        if (auth_id) invalidateSanction(auth_id);
+
+        log("INFO", "admin_set_plan", { by: req.user.id, target: user_id || auth_id, plan: planLower, ip: req.ip });
+        res.json({ success: true, plan: planLower, max_credits: payload.max_credits });
+    } catch (e) {
+        log("ERROR", "set_plan_fail", { msg: e.message, ip: req.ip });
+        res.status(500).json({ error: "Erreur serveur: " + e.message });
+    }
+});
+
+// ==================== ADMIN: SET CREDITS ====================
+// action: "add" | "set" | "set_max"
+app.post("/api/admin/set-credits", requireAdmin, adminLimiter, async (req, res) => {
+    if (!supabaseAdmin) return res.status(503).json({ error: "Service indisponible" });
+    const { user_id, auth_id, action, amount } = req.body;
+
+    if (!["add", "set", "set_max"].includes(action)) {
+        return res.status(400).json({ error: "action invalide: add | set | set_max" });
+    }
+    if (amount == null || isNaN(parseInt(amount))) {
+        return res.status(400).json({ error: "amount (nombre) requis" });
+    }
+    if (!user_id && !auth_id) {
+        return res.status(400).json({ error: "user_id ou auth_id requis" });
+    }
+
+    const amt = parseInt(amount);
+    if (amt < 0 || amt > 99999) return res.status(400).json({ error: "Amount hors limites (0-99999)" });
+
+    try {
+        // First, get current user data
+        let userData = null;
+        if (auth_id) {
+            const { data } = await supabaseAdmin.from("users").select("id, credits, max_credits").eq("auth_id", auth_id).maybeSingle();
+            userData = data;
+        }
+        if (!userData && user_id) {
+            const { data } = await supabaseAdmin.from("users").select("id, credits, max_credits").eq("id", user_id).maybeSingle();
+            userData = data;
+        }
+        if (!userData) return res.status(404).json({ error: "Utilisateur introuvable" });
+
+        let payload = {};
+        let newVal;
+        if (action === "add") {
+            newVal = (userData.credits || 0) + amt;
+            payload = { credits: newVal };
+        } else if (action === "set") {
+            newVal = amt;
+            payload = { credits: newVal };
+        } else if (action === "set_max") {
+            if (amt < 1) return res.status(400).json({ error: "max_credits minimum: 1" });
+            newVal = amt;
+            payload = { max_credits: newVal };
+        }
+
+        const { data: updated, error } = await supabaseAdmin
+            .from("users").update(payload).eq("id", userData.id).select("id, credits, max_credits");
+        if (error) throw error;
+        if (!updated || updated.length === 0) return res.status(404).json({ error: "Aucune ligne mise à jour" });
+
+        log("INFO", "admin_set_credits", { by: req.user.id, target: userData.id, action, amount: amt, ip: req.ip });
+        res.json({ success: true, action, new_value: newVal, user: updated[0] });
+    } catch (e) {
+        log("ERROR", "set_credits_fail", { msg: e.message, ip: req.ip });
+        res.status(500).json({ error: "Erreur serveur: " + e.message });
+    }
+});
+
+// ==================== LOG EVENT ====================
 app.post("/api/log-event", logLimiter, async (req, res) => {
     const { action_type, action_description, user_id } = req.body;
     if (!action_type || typeof action_type !== "string") return res.status(400).json({ error: "action_type requis" });
@@ -356,7 +490,6 @@ app.post("/verify-captcha", captchaLimiter, async (req, res) => {
     } catch (_) { res.status(500).json({ success: false, message: "Erreur captcha" }); }
 });
 
-// Register + Login validation
 app.post("/validate-register", registerLimiter, (req, res) => {
     const { email, password, csrfNonce } = req.body;
     if (!consumeCsrfNonce(csrfNonce))  return res.status(403).json({ success: false, message: "CSRF invalide" });
@@ -372,73 +505,59 @@ app.post("/validate-login", loginLimiter, (req, res) => {
     res.json({ success: true });
 });
 
-// ==================== NOTIFICATION ROUTES ====================
+// ==================== NOTIFICATIONS ====================
 const notifyLimiter = mkLimiter(60 * 1000, 10, "Trop de notifications.");
-
 async function sendWebhook(payload) {
     if (!WEBHOOK_URL || WEBHOOK_URL.includes("ICI")) return;
     try {
-        await fetch(WEBHOOK_URL, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-        });
-    } catch (e) {
-        log("WARN", "webhook_fail", { msg: e.message });
-    }
+        await fetch(WEBHOOK_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    } catch (e) { log("WARN", "webhook_fail", { msg: e.message }); }
 }
 
 app.post("/api/notify-register", notifyLimiter, async (req, res) => {
     const { email } = req.body;
-    if (!email || typeof email !== "string" || !validateEmail(email)) {
-        return res.status(400).json({ error: "Email invalide" });
-    }
+    if (!email || typeof email !== "string" || !validateEmail(email)) return res.status(400).json({ error: "Email invalide" });
     const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip;
     log("INFO", "new_register", { email: sanitize(email, 254), ip });
-    await sendWebhook({
-        embeds: [{
-            title: "🆕 Nouvelle inscription",
-            color: 0x22c55e,
-            fields: [
-                { name: "Email", value: sanitize(email, 254), inline: true },
-                { name: "IP", value: ip, inline: true },
-                { name: "Date", value: new Date().toLocaleString("fr-FR"), inline: false }
-            ]
-        }]
-    });
+    await sendWebhook({ embeds: [{ title: "Nouvelle inscription", color: 0x22c55e, fields: [{ name: "Email", value: sanitize(email, 254), inline: true }, { name: "IP", value: ip, inline: true }, { name: "Date", value: new Date().toLocaleString("fr-FR"), inline: false }] }] });
     res.json({ success: true });
 });
 
 app.post("/api/notify-login", requireAuth, notifyLimiter, async (req, res) => {
     const { email } = req.body;
-    if (!email || typeof email !== "string" || !validateEmail(email)) {
-        return res.status(400).json({ error: "Email invalide" });
-    }
+    if (!email || typeof email !== "string" || !validateEmail(email)) return res.status(400).json({ error: "Email invalide" });
     const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip;
     log("INFO", "user_login", { uid: req.user?.id, email: sanitize(email, 254), ip });
-    await sendWebhook({
-        embeds: [{
-            title: "🔐 Connexion utilisateur",
-            color: 0x60a5fa,
-            fields: [
-                { name: "Email", value: sanitize(email, 254), inline: true },
-                { name: "IP", value: ip, inline: true },
-                { name: "UID", value: req.user?.id || "—", inline: false },
-                { name: "Date", value: new Date().toLocaleString("fr-FR"), inline: false }
-            ]
-        }]
-    });
+    await sendWebhook({ embeds: [{ title: "Connexion utilisateur", color: 0x60a5fa, fields: [{ name: "Email", value: sanitize(email, 254), inline: true }, { name: "IP", value: ip, inline: true }, { name: "UID", value: req.user?.id || "—", inline: false }, { name: "Date", value: new Date().toLocaleString("fr-FR"), inline: false }] }] });
     res.json({ success: true });
 });
 
 // ==================== SEEKNOW SEARCH ====================
-const VALID_SEARCH_TYPES = new Set(["email","username","phone","ip","domain","name","hash","auto"]);
+const VALID_SEARCH_TYPES = new Set(["email","username","phone","ip","domain","name","hash","auto","stealer"]);
+
+// Helper: perform a SeeKnow API call
+async function doSeeKnow(query, type, uid, ip) {
+    if (!SEEKNOW_API_KEY || SEEKNOW_API_KEY.includes("ICI")) {
+        throw { status: 503, error: "Service de recherche non configuré." };
+    }
+    const sanitizedQuery = query.trim().substring(0, 300);
+    const start = Date.now();
+    const skRes = await fetch("https://see-know.eu/api/v1/search", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${SEEKNOW_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ query: sanitizedQuery, type: type === "stealer" ? "auto" : type, limit: 100 })
+    });
+    const responseTime = Date.now() - start;
+    if (!skRes.ok) {
+        log("WARN", "seeknow_api_error", { status: skRes.status, ip, uid });
+        throw { status: skRes.status >= 500 ? 502 : skRes.status, error: "Erreur API SeeKnow.", detail: skRes.status };
+    }
+    const data = await skRes.json();
+    log("INFO", "seeknow_search", { uid, ip, type, total: data.total, ms: responseTime });
+    return { ...data, response_time_ms: responseTime };
+}
 
 app.post("/api/search", requireAuth, searchLimiter, async (req, res) => {
-    if (!SEEKNOW_API_KEY || SEEKNOW_API_KEY.includes("ICI")) {
-        log("ERROR", "seeknow_missing_key", { ip: req.ip });
-        return res.status(503).json({ error: "Service de recherche non configuré. Ajoutez SEEKNOW_API_KEY." });
-    }
     const { query, type = "auto" } = req.body;
     if (!query || typeof query !== "string" || query.trim().length < 2) {
         return res.status(400).json({ error: "Paramètre 'query' invalide (2 caractères minimum)." });
@@ -446,27 +565,47 @@ app.post("/api/search", requireAuth, searchLimiter, async (req, res) => {
     if (!VALID_SEARCH_TYPES.has(type)) {
         return res.status(400).json({ error: "Type de recherche invalide." });
     }
-    const sanitizedQuery = query.trim().substring(0, 300);
-    const start = Date.now();
+
+    // Check sanctions (ban + block_search) — 30s cache, fast
+    const sanction = await getSanction(req.user.id);
+    if (sanction.banned) {
+        return res.status(403).json({ error: "Votre compte est banni. Contactez le support." });
+    }
+    if (sanction.blockSearch) {
+        return res.status(403).json({ error: "Votre accès à la recherche a été bloqué par un administrateur." });
+    }
+
     try {
-        const skRes = await fetch("https://see-know.eu/api/v1/search", {
-            method: "POST",
-            headers: {
-                "Authorization": `Bearer ${SEEKNOW_API_KEY}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({ query: sanitizedQuery, type, limit: 100 })
-        });
-        const responseTime = Date.now() - start;
-        if (!skRes.ok) {
-            log("WARN", "seeknow_api_error", { status: skRes.status, ip: req.ip, uid: req.user?.id });
-            return res.status(skRes.status >= 500 ? 502 : skRes.status).json({ error: "Erreur API SeeKnow.", detail: skRes.status });
-        }
-        const data = await skRes.json();
-        log("INFO", "seeknow_search", { uid: req.user?.id, ip: req.ip, type, total: data.total, ms: responseTime });
-        res.json({ ...data, responseTime });
+        const data = await doSeeKnow(query, type, req.user.id, req.ip);
+        res.json(data);
     } catch (e) {
+        if (e.status) return res.status(e.status).json({ error: e.error, detail: e.detail });
         log("ERROR", "seeknow_fetch_fail", { msg: e.message, ip: req.ip });
+        res.status(502).json({ error: "Impossible de joindre l'API SeeKnow." });
+    }
+});
+
+// Stealer endpoint (same logic, enforces block_search)
+app.post("/api/stealer", requireAuth, searchLimiter, async (req, res) => {
+    const { query, type = "auto" } = req.body;
+    if (!query || typeof query !== "string" || query.trim().length < 2) {
+        return res.status(400).json({ error: "Paramètre 'query' invalide (2 caractères minimum)." });
+    }
+
+    const sanction = await getSanction(req.user.id);
+    if (sanction.banned) {
+        return res.status(403).json({ error: "Votre compte est banni. Contactez le support." });
+    }
+    if (sanction.blockSearch) {
+        return res.status(403).json({ error: "Votre accès à la recherche a été bloqué par un administrateur." });
+    }
+
+    try {
+        const data = await doSeeKnow(query, "stealer", req.user.id, req.ip);
+        res.json(data);
+    } catch (e) {
+        if (e.status) return res.status(e.status).json({ error: e.error, detail: e.detail });
+        log("ERROR", "stealer_fetch_fail", { msg: e.message, ip: req.ip });
         res.status(502).json({ error: "Impossible de joindre l'API SeeKnow." });
     }
 });
@@ -475,4 +614,3 @@ app.use((req, res) => res.status(404).json({ error: "Route non trouvée" }));
 app.use((err, req, res, _next) => { log("ERROR", "unhandled", { msg: err.message }); res.status(500).json({ error: "Erreur interne" }); });
 
 server.listen(PORT, () => log("INFO", "server_start", { port: PORT }));
-
