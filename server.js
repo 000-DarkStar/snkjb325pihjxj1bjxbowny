@@ -533,47 +533,70 @@ app.post("/api/notify-login", requireAuth, notifyLimiter, async (req, res) => {
 });
 
 // ==================== SEEKNOW SEARCH ====================
-const VALID_SEARCH_TYPES = new Set(["email","username","phone","ip","domain","name","hash","auto","stealer"]);
+const VALID_SEARCH_TYPES  = new Set(["email","username","phone","ip","domain","name","hash","auto","url","machine_id"]);
+const VALID_STEALER_TYPES = new Set(["email","username","ip","domain","url","machine_id","auto"]);
+const SK_BASE = "https://see-know.eu/api/v1";
 
-// Helper: perform a SeeKnow API call
+function skHeaders() {
+    return { "X-API-Key": SEEKNOW_API_KEY, "Content-Type": "application/json" };
+}
+
+// POST helper (search + stealer)
 async function doSeeKnow(query, type, uid, ip) {
-    if (!SEEKNOW_API_KEY || SEEKNOW_API_KEY.includes("ICI")) {
+    if (!SEEKNOW_API_KEY || SEEKNOW_API_KEY.includes("ICI"))
         throw { status: 503, error: "Service de recherche non configuré." };
-    }
     const sanitizedQuery = query.trim().substring(0, 300);
+    const isStealerEndpoint = type === "stealer";
+    const endpoint = isStealerEndpoint ? `${SK_BASE}/stealer` : `${SK_BASE}/search`;
+    const bodyType = isStealerEndpoint ? "auto" : type;
     const start = Date.now();
-    const skRes = await fetch("https://see-know.eu/api/v1/search", {
+    const skRes = await fetch(endpoint, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${SEEKNOW_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ query: sanitizedQuery, type: type === "stealer" ? "auto" : type, limit: 100 })
+        headers: skHeaders(),
+        body: JSON.stringify({ query: sanitizedQuery, type: bodyType })
     });
     const responseTime = Date.now() - start;
     if (!skRes.ok) {
         log("WARN", "seeknow_api_error", { status: skRes.status, ip, uid });
-        throw { status: skRes.status >= 500 ? 502 : skRes.status, error: "Erreur API SeeKnow.", detail: skRes.status };
+        const errBody = await skRes.json().catch(() => ({}));
+        throw { status: skRes.status >= 500 ? 502 : skRes.status, error: errBody.message || "Erreur API SeeKnow.", detail: skRes.status };
     }
     const data = await skRes.json();
     log("INFO", "seeknow_search", { uid, ip, type, total: data.total, ms: responseTime });
     return { ...data, response_time_ms: responseTime };
 }
 
+// GET helper for OSINT endpoints
+async function doSeeKnowGet(path, params, uid, ip) {
+    if (!SEEKNOW_API_KEY || SEEKNOW_API_KEY.includes("ICI"))
+        throw { status: 503, error: "Service OSINT non configuré." };
+    const qs = new URLSearchParams(params).toString();
+    const start = Date.now();
+    const skRes = await fetch(`${SK_BASE}${path}?${qs}`, {
+        method: "GET",
+        headers: { "X-API-Key": SEEKNOW_API_KEY }
+    });
+    const responseTime = Date.now() - start;
+    if (!skRes.ok) {
+        const errBody = await skRes.json().catch(() => ({}));
+        log("WARN", "seeknow_osint_error", { path, status: skRes.status, ip, uid });
+        throw { status: skRes.status >= 500 ? 502 : skRes.status, error: errBody.message || `Erreur API (${skRes.status}).` };
+    }
+    const data = await skRes.json();
+    log("INFO", "seeknow_osint", { uid, ip, path, ms: responseTime });
+    return { ...data, response_time_ms: responseTime };
+}
+
 app.post("/api/search", requireAuth, searchLimiter, async (req, res) => {
     const { query, type = "auto" } = req.body;
-    if (!query || typeof query !== "string" || query.trim().length < 2) {
+    if (!query || typeof query !== "string" || query.trim().length < 2)
         return res.status(400).json({ error: "Paramètre 'query' invalide (2 caractères minimum)." });
-    }
-    if (!VALID_SEARCH_TYPES.has(type)) {
+    if (!VALID_SEARCH_TYPES.has(type))
         return res.status(400).json({ error: "Type de recherche invalide." });
-    }
 
-    // Check sanctions (ban + block_search) — 30s cache, fast
     const sanction = await getSanction(req.user.id);
-    if (sanction.banned) {
-        return res.status(403).json({ error: "Votre compte est banni. Contactez le support." });
-    }
-    if (sanction.blockSearch) {
-        return res.status(403).json({ error: "Votre accès à la recherche a été bloqué par un administrateur." });
-    }
+    if (sanction.banned)       return res.status(403).json({ error: "Votre compte est banni. Contactez le support." });
+    if (sanction.blockSearch)  return res.status(403).json({ error: "Votre accès à la recherche a été bloqué par un administrateur." });
 
     try {
         const data = await doSeeKnow(query, type, req.user.id, req.ip);
@@ -585,20 +608,16 @@ app.post("/api/search", requireAuth, searchLimiter, async (req, res) => {
     }
 });
 
-// Stealer endpoint (same logic, enforces block_search)
 app.post("/api/stealer", requireAuth, searchLimiter, async (req, res) => {
     const { query, type = "auto" } = req.body;
-    if (!query || typeof query !== "string" || query.trim().length < 2) {
+    if (!query || typeof query !== "string" || query.trim().length < 2)
         return res.status(400).json({ error: "Paramètre 'query' invalide (2 caractères minimum)." });
-    }
+    if (!VALID_STEALER_TYPES.has(type))
+        return res.status(400).json({ error: "Type invalide pour stealer." });
 
     const sanction = await getSanction(req.user.id);
-    if (sanction.banned) {
-        return res.status(403).json({ error: "Votre compte est banni. Contactez le support." });
-    }
-    if (sanction.blockSearch) {
-        return res.status(403).json({ error: "Votre accès à la recherche a été bloqué par un administrateur." });
-    }
+    if (sanction.banned)       return res.status(403).json({ error: "Votre compte est banni. Contactez le support." });
+    if (sanction.blockSearch)  return res.status(403).json({ error: "Votre accès à la recherche a été bloqué par un administrateur." });
 
     try {
         const data = await doSeeKnow(query, "stealer", req.user.id, req.ip);
@@ -610,9 +629,60 @@ app.post("/api/stealer", requireAuth, searchLimiter, async (req, res) => {
     }
 });
 
+// ==================== SEEKNOW CREDITS ====================
+app.get("/api/sk-credits", requireAuth, async (req, res) => {
+    try {
+        const data = await doSeeKnowGet("/credits", {}, req.user.id, req.ip);
+        res.json(data);
+    } catch (e) {
+        if (e.status) return res.status(e.status).json({ error: e.error });
+        res.status(502).json({ error: "Impossible de récupérer les crédits SeeKnow." });
+    }
+});
+
+// ==================== OSINT ENDPOINTS ====================
+const osintLimiter = mkLimiter(60 * 1000, 30, "Trop de requêtes OSINT.");
+
+function osintRoute(path, paramKey, skPath) {
+    app.get(`/api/osint/${path}`, requireAuth, osintLimiter, async (req, res) => {
+        const val = req.query[paramKey];
+        if (!val || typeof val !== "string" || val.trim().length < 1)
+            return res.status(400).json({ error: `Paramètre '${paramKey}' manquant.` });
+        const sanction = await getSanction(req.user.id);
+        if (sanction.banned) return res.status(403).json({ error: "Compte banni." });
+        try {
+            const data = await doSeeKnowGet(skPath, { [paramKey]: val.trim().substring(0, 200) }, req.user.id, req.ip);
+            res.json(data);
+        } catch (e) {
+            if (e.status) return res.status(e.status).json({ error: e.error });
+            res.status(502).json({ error: "Erreur API SeeKnow." });
+        }
+    });
+}
+
+// Discord
+osintRoute("discord-user",    "query",    "/discord/user");
+osintRoute("discord-roblox",  "query",    "/discord/to-roblox");
+// Social / Username
+osintRoute("github",          "username", "/username/github");
+osintRoute("twitter",         "username", "/username/twitter");
+osintRoute("tiktok",          "username", "/username/tiktok");
+osintRoute("reddit",          "username", "/username/reddit");
+osintRoute("social",          "username", "/username/social");
+osintRoute("username-history","username", "/username/history");
+// Gaming
+osintRoute("xbox",            "username", "/gaming/xbox");
+osintRoute("roblox",          "username", "/gaming/roblox");
+osintRoute("minecraft",       "username", "/gaming/minecraft");
+// Network & Email
+osintRoute("ip",              "ip",       "/network/ip");
+osintRoute("email-check",     "email",    "/network/email-check");
+osintRoute("phone",           "phone",    "/network/phone");
+// Domain
+osintRoute("domain-intel",    "domain",   "/domain/intel");
+osintRoute("whois",           "domain",   "/domain/whois");
+
 app.use((req, res) => res.status(404).json({ error: "Route non trouvée" }));
 app.use((err, req, res, _next) => { log("ERROR", "unhandled", { msg: err.message }); res.status(500).json({ error: "Erreur interne" }); });
 
 server.listen(PORT, () => log("INFO", "server_start", { port: PORT }));
-
-
