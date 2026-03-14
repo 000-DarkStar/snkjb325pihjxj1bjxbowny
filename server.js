@@ -21,7 +21,7 @@ const SUPABASE_URL         = process.env.SUPABASE_URL         || "https://ohmkql
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9obWtxbG91aWVwemtieXp0bnNtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTI2ODYyMywiZXhwIjoyMDg0ODQ0NjIzfQ.Z3BNfmfoWAO1ocgCJBadxfKF_X54fF9KZQfVn0woDes";
 const SEEKNOW_API_KEY      = process.env.SEEKNOW_API_KEY      || "seek-64ea0dcd3c7893c15afd1003b522cdbc65326e447a76cbe4";
 const WEBHOOK_URL          = process.env.WEBHOOK_URL          || "https://ptb.discord.com/api/webhooks/1473486621973151744/1Oy02CferN_JUUkkxOLHJSPxNVVst-mgGWE51KjOBJfzYZzh32HTahznN5hfdFEEBpqo";
-const ALLOWED_ORIGINS      = (process.env.ALLOWED_ORIGINS || "https://searchlabs.pages.dev")
+const ALLOWED_ORIGINS      = (process.env.ALLOWED_ORIGINS || "")
     .split(",").map(s => s.trim()).filter(Boolean);
 
 const supabaseAdmin = (SUPABASE_URL && SUPABASE_SERVICE_KEY && !SUPABASE_SERVICE_KEY.includes("ICI"))
@@ -353,10 +353,10 @@ app.post("/api/admin/set-plan", requireAdmin, adminLimiter, async (req, res) => 
     }
 
     const planLower = plan.toLowerCase();
-    const payload = { plan: planLower };
-    if (max_credits != null && !isNaN(parseInt(max_credits))) {
-        payload.max_credits = parseInt(max_credits);
-    }
+    const newMaxCredits = (max_credits != null && !isNaN(parseInt(max_credits)))
+        ? parseInt(max_credits)
+        : { free: 10, premium: 50, unlimited: 9999, admin: 9999, moderator: 200 }[planLower] || 10;
+    const payload = { plan: planLower, max_credits: newMaxCredits, credits: newMaxCredits };
 
     try {
         let updated = false;
@@ -681,6 +681,55 @@ osintRoute("phone",           "phone",    "/network/phone");
 // Domain
 osintRoute("domain-intel",    "domain",   "/domain/intel");
 osintRoute("whois",           "domain",   "/domain/whois");
+
+
+// ==================== AUTH ME ====================
+app.get("/api/auth/me", requireAuth, async (req, res) => {
+    if (!supabaseAdmin) return res.status(503).json({ error: "Service indisponible" });
+    try {
+        const { data: user, error } = await supabaseAdmin
+            .from("users")
+            .select("*")
+            .eq("auth_id", req.user.id)
+            .maybeSingle();
+        if (error || !user) return res.status(404).json({ error: "Utilisateur introuvable" });
+        res.json({
+            auth_id:            user.auth_id,
+            email:              user.email,
+            username:           user.username || user.chat_pseudo || user.email?.split("@")[0],
+            abonnement:         user.plan || user.abonnement || "free",
+            plan:               user.plan || user.abonnement || "free",
+            daily_searches_used: user.max_credits != null && user.credits != null ? Math.max(0, user.max_credits - user.credits) : 0,
+            daily_limit:        user.max_credits || 10,
+            max_credits:        user.max_credits || 10,
+            credits:            user.credits ?? 0,
+            total_searches:     user.total_searches || 0,
+            key:                user.key || null,
+            ip_whitelist:       user.ip_whitelist || [],
+            is_admin:           ADMIN_UIDS.has(req.user.id)
+        });
+    } catch (e) { res.status(500).json({ error: "Erreur serveur" }); }
+});
+
+// ==================== REGISTER SYNC ====================
+app.post("/api/register", requireAuth, async (req, res) => {
+    if (!supabaseAdmin) return res.json({ success: true });
+    const { username } = req.body;
+    try {
+        const existing = await supabaseAdmin.from("users").select("id").eq("auth_id", req.user.id).maybeSingle();
+        if (!existing.data) {
+            await supabaseAdmin.from("users").insert({
+                auth_id:  req.user.id,
+                email:    req.user.email,
+                username: username ? sanitize(username, 50) : req.user.email?.split("@")[0],
+                plan:     "free",
+                credits:  10,
+                max_credits: 10
+            });
+        }
+        res.json({ success: true });
+    } catch (e) { res.json({ success: true }); }
+});
 
 app.use((req, res) => res.status(404).json({ error: "Route non trouvée" }));
 app.use((err, req, res, _next) => { log("ERROR", "unhandled", { msg: err.message }); res.status(500).json({ error: "Erreur interne" }); });
