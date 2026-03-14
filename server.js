@@ -731,6 +731,202 @@ app.post("/api/register", requireAuth, async (req, res) => {
     } catch (e) { res.json({ success: true }); }
 });
 
+
+// ==================== API v1 — PROXY ROUTES ====================
+// These expose /api/v1/* so the frontend never hardcodes the backend URL.
+// Cloudflare Pages _redirects: /api/v1/* → backend/api/v1/*
+
+// v1 search (SeeKnow)
+app.post("/api/v1/search", requireAuth, searchLimiter, async (req, res) => {
+    const { query, type = "auto" } = req.body;
+    if (!query || typeof query !== "string" || query.trim().length < 2)
+        return res.status(400).json({ error: "Paramètre 'query' invalide (2 caractères minimum)." });
+    if (!VALID_SEARCH_TYPES.has(type))
+        return res.status(400).json({ error: "Type de recherche invalide." });
+    const sanction = await getSanction(req.user.id);
+    if (sanction.banned)      return res.status(403).json({ error: "Votre compte est banni." });
+    if (sanction.blockSearch) return res.status(403).json({ error: "Votre accès à la recherche est bloqué." });
+    try {
+        const data = await doSeeKnow(query, type, req.user.id, req.ip);
+        res.json(data);
+    } catch (e) {
+        if (e.status) return res.status(e.status).json({ error: e.error, detail: e.detail });
+        res.status(502).json({ error: "Impossible de joindre l'API SeeKnow." });
+    }
+});
+
+// v1 stealer (SeeKnow stealer endpoint)
+app.post("/api/v1/stealer", requireAuth, searchLimiter, async (req, res) => {
+    const { query, type = "auto" } = req.body;
+    if (!query || typeof query !== "string" || query.trim().length < 2)
+        return res.status(400).json({ error: "Paramètre 'query' invalide." });
+    const sanction = await getSanction(req.user.id);
+    if (sanction.banned)      return res.status(403).json({ error: "Votre compte est banni." });
+    if (sanction.blockSearch) return res.status(403).json({ error: "Votre accès à la recherche est bloqué." });
+    try {
+        const data = await doSeeKnow(query, "stealer", req.user.id, req.ip);
+        res.json(data);
+    } catch (e) {
+        if (e.status) return res.status(e.status).json({ error: e.error });
+        res.status(502).json({ error: "Impossible de joindre l'API SeeKnow." });
+    }
+});
+
+// v1 auth me
+app.get("/api/v1/auth/me", requireAuth, async (req, res) => {
+    if (!supabaseAdmin) return res.status(503).json({ error: "Service indisponible" });
+    try {
+        const { data: user } = await supabaseAdmin.from("users").select("*").eq("auth_id", req.user.id).maybeSingle();
+        if (!user) return res.status(404).json({ error: "Utilisateur introuvable" });
+        res.json({
+            auth_id: user.auth_id, email: user.email,
+            username: user.username || user.chat_pseudo || user.email?.split("@")[0],
+            abonnement: user.plan || "free", plan: user.plan || "free",
+            daily_searches_used: Math.max(0, (user.max_credits||10) - (user.credits||0)),
+            daily_limit: user.max_credits || 10, max_credits: user.max_credits || 10,
+            credits: user.credits ?? 0, total_searches: user.total_searches || 0,
+            key: user.key || null, ip_whitelist: user.ip_whitelist || [],
+            is_admin: ADMIN_UIDS.has(req.user.id)
+        });
+    } catch (e) { res.status(500).json({ error: "Erreur serveur" }); }
+});
+
+// v1 notifications
+app.get("/api/v1/account/notifications", requireAuth, async (req, res) => {
+    const n = userNotifications.get(req.user.id) || [];
+    res.json({ success: true, notifications: n, unread_count: n.filter(x => !x.read).length });
+});
+app.post("/api/v1/account/notifications/read-all", requireAuth, async (req, res) => {
+    const n = userNotifications.get(req.user.id) || [];
+    n.forEach(x => { x.read = true; });
+    res.json({ success: true });
+});
+app.delete("/api/v1/account/notifications/:id", requireAuth, async (req, res) => {
+    const n = (userNotifications.get(req.user.id) || []).filter(x => x.id !== req.params.id);
+    userNotifications.set(req.user.id, n);
+    res.json({ success: true });
+});
+
+// v1 sessions
+app.get("/api/v1/auth/sessions", requireAuth, async (req, res) => {
+    const sessions = (activeSessions.get(req.user.id) || []);
+    res.json({ success: true, sessions });
+});
+app.delete("/api/v1/auth/sessions/:id", requireAuth, async (req, res) => {
+    const sessions = (activeSessions.get(req.user.id) || []).filter(s => s.sessionId !== req.params.id);
+    activeSessions.set(req.user.id, sessions);
+    res.json({ success: true });
+});
+app.post("/api/v1/auth/revoke-all-sessions", requireAuth, async (req, res) => {
+    activeSessions.set(req.user.id, []);
+    res.json({ success: true });
+});
+
+// v1 activities
+app.get("/api/v1/account/activities", requireAuth, async (req, res) => {
+    const limit = parseInt(req.query.limit) || 50;
+    const acts = (userActivities.get(req.user.id) || []).slice(0, limit);
+    res.json({ success: true, activities: acts });
+});
+
+// v1 update password (via Supabase)
+app.post("/api/v1/auth/update-password", requireAuth, async (req, res) => {
+    if (!supabaseAdmin) return res.status(503).json({ error: "Service indisponible" });
+    const { newPassword } = req.body;
+    if (!newPassword || typeof newPassword !== "string" || newPassword.length < 8)
+        return res.status(400).json({ error: "Mot de passe invalide (8 caractères minimum)" });
+    if (!/(?=.*[A-Z])(?=.*\d)(?=.*[^a-zA-Z0-9])/.test(newPassword))
+        return res.status(400).json({ error: "Le mot de passe doit contenir 1 majuscule, 1 chiffre, 1 symbole" });
+    try {
+        const { error } = await supabaseAdmin.auth.admin.updateUserById(req.user.id, { password: newPassword });
+        if (error) return res.status(400).json({ error: error.message });
+        log("INFO", "password_changed", { uid: req.user.id, ip: req.ip });
+        res.json({ success: true, message: "Mot de passe mis à jour" });
+    } catch (e) { res.status(500).json({ error: "Erreur serveur" }); }
+});
+
+// v1 update preferences
+app.post("/api/v1/account/update-preferences", requireAuth, async (req, res) => {
+    const { displayName } = req.body;
+    if (!displayName || typeof displayName !== "string" || !displayName.trim())
+        return res.status(400).json({ error: "Nom invalide" });
+    if (!supabaseAdmin) return res.json({ success: true });
+    try {
+        await supabaseAdmin.from("users").update({ username: sanitize(displayName.trim(), 50) }).eq("auth_id", req.user.id);
+        userPreferences.set(req.user.id, { displayName: displayName.trim() });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: "Erreur serveur" }); }
+});
+
+// v1 reset-api-key
+app.post("/api/v1/account/reset-api-key", requireAuth, async (req, res) => {
+    const cooldown = keyResetCooldowns.get(req.user.id);
+    if (cooldown && Date.now() - cooldown < 48 * 3600 * 1000) {
+        const remain = Math.ceil((48 * 3600 * 1000 - (Date.now() - cooldown)) / 3600000);
+        return res.status(429).json({ error: `Cooldown actif — disponible dans ${remain}h` });
+    }
+    const newKey = "sk-" + crypto.randomBytes(24).toString("hex").slice(0, 32);
+    keyResetCooldowns.set(req.user.id, Date.now());
+    if (supabaseAdmin) {
+        try { await supabaseAdmin.from("users").update({ key: newKey }).eq("auth_id", req.user.id); } catch (_) {}
+    }
+    log("INFO", "api_key_reset", { uid: req.user.id, ip: req.ip });
+    res.json({ success: true, newKey });
+});
+
+// v1 key reset status
+app.get("/api/v1/account/key-reset-status", requireAuth, async (req, res) => {
+    const cooldown = keyResetCooldowns.get(req.user.id);
+    if (!cooldown || Date.now() - cooldown >= 48 * 3600 * 1000)
+        return res.json({ canReset: true });
+    const remain = Math.ceil((48 * 3600 * 1000 - (Date.now() - cooldown)) / 3600000);
+    res.json({ canReset: false, timeRemaining: remain + "h" });
+});
+
+// v1 sk-credits
+app.get("/api/v1/sk-credits", requireAuth, async (req, res) => {
+    try {
+        const data = await doSeeKnowGet("/credits", {}, req.user.id, req.ip);
+        res.json(data);
+    } catch (e) {
+        if (e.status) return res.status(e.status).json({ error: e.error });
+        res.status(502).json({ error: "Impossible de récupérer les crédits SeeKnow." });
+    }
+});
+
+// v1 osint routes (same as existing)
+function osintV1Route(path, paramKey, skPath) {
+    app.get(`/api/v1/osint/${path}`, requireAuth, osintLimiter, async (req, res) => {
+        const val = req.query[paramKey];
+        if (!val) return res.status(400).json({ error: `Paramètre '${paramKey}' manquant.` });
+        const sanction = await getSanction(req.user.id);
+        if (sanction.banned) return res.status(403).json({ error: "Compte banni." });
+        try {
+            const data = await doSeeKnowGet(skPath, { [paramKey]: val.trim().substring(0, 200) }, req.user.id, req.ip);
+            res.json(data);
+        } catch (e) {
+            if (e.status) return res.status(e.status).json({ error: e.error });
+            res.status(502).json({ error: "Erreur API SeeKnow." });
+        }
+    });
+}
+osintV1Route("discord-user",    "query",    "/discord/user");
+osintV1Route("discord-roblox",  "query",    "/discord/to-roblox");
+osintV1Route("github",          "username", "/username/github");
+osintV1Route("twitter",         "username", "/username/twitter");
+osintV1Route("tiktok",          "username", "/username/tiktok");
+osintV1Route("reddit",          "username", "/username/reddit");
+osintV1Route("social",          "username", "/username/social");
+osintV1Route("ip",              "ip",       "/network/ip");
+osintV1Route("email-check",     "email",    "/network/email-check");
+osintV1Route("phone",           "phone",    "/network/phone");
+osintV1Route("domain-intel",    "domain",   "/domain/intel");
+osintV1Route("whois",           "domain",   "/domain/whois");
+osintV1Route("roblox",          "username", "/gaming/roblox");
+osintV1Route("xbox",            "username", "/gaming/xbox");
+osintV1Route("minecraft",       "username", "/gaming/minecraft");
+
+
 app.use((req, res) => res.status(404).json({ error: "Route non trouvée" }));
 app.use((err, req, res, _next) => { log("ERROR", "unhandled", { msg: err.message }); res.status(500).json({ error: "Erreur interne" }); });
 
