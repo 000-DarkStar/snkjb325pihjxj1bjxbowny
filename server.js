@@ -229,6 +229,22 @@ async function getSanction(authId) {
 // Invalidate sanction cache for a user
 function invalidateSanction(authId) { if (authId) sanctionCache.delete(authId); }
 
+// ==================== IN-MEMORY STORES ====================
+const userActivities    = new Map(); // uid → activity[]
+const userNotifications = new Map(); // uid → notification[]
+const activeSessions    = new Map(); // uid → session[]
+const userPreferences   = new Map(); // uid → prefs object
+const keyResetCooldowns = new Map(); // uid → timestamp
+
+// Helper: push an activity entry for a user (cap at 200)
+function pushActivity(uid, entry) {
+    if (!uid) return;
+    const list = userActivities.get(uid) || [];
+    list.unshift({ id: `act_${Date.now()}_${Math.random().toString(36).slice(2,6)}`, ...entry, created_at: new Date().toISOString() });
+    if (list.length > 200) list.length = 200;
+    userActivities.set(uid, list);
+}
+
 // ==================== SOCKET.IO ====================
 let onlineUsers = 0;
 const connectedSockets = new Map();
