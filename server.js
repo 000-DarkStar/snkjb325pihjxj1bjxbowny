@@ -583,7 +583,16 @@ async function doSeeKnow(query, type, uid, ip) {
     if (!skRes.ok) {
         log("WARN", "seeknow_api_error", { status: skRes.status, ip, uid });
         const errBody = await skRes.json().catch(() => ({}));
-        throw { status: skRes.status >= 500 ? 502 : skRes.status, error: errBody.message || "Erreur API SeeKnow.", detail: skRes.status };
+        const SK_ERRORS = {
+            401: { status: 502, error: "Clé API SeeKnow invalide. Contactez un administrateur." },
+            402: { status: 402, error: "Crédits SeeKnow insuffisants. Réessayez demain ou upgradez votre plan." },
+            403: { status: 403, error: "Accès refusé par SeeKnow — votre plan ne permet pas cette recherche." },
+            404: { status: 404, error: "Aucun résultat trouvé." },
+            429: { status: 429, error: "Limite de requêtes SeeKnow atteinte. Réessayez dans quelques secondes." },
+        };
+        const mapped = SK_ERRORS[skRes.status];
+        if (mapped) throw mapped;
+        throw { status: 502, error: errBody.message || `Erreur upstream SeeKnow (${skRes.status}).`, detail: skRes.status };
     }
     const data = await skRes.json();
     log("INFO", "seeknow_search", { uid, ip, type, total: data.total, ms: responseTime });
@@ -591,23 +600,34 @@ async function doSeeKnow(query, type, uid, ip) {
 }
 
 // GET helper for OSINT endpoints
-async function doSeeKnowGet(path, params, uid, ip) {
+async function doSeeKnowGet(skPath, params, uid, ip) {
     if (!SEEKNOW_API_KEY || SEEKNOW_API_KEY.includes("ICI"))
         throw { status: 503, error: "Service OSINT non configuré." };
     const qs = new URLSearchParams(params).toString();
     const start = Date.now();
-    const skRes = await fetch(`${SK_BASE}${path}?${qs}`, {
+    const skRes = await fetch(`${SK_BASE}${skPath}?${qs}`, {
         method: "GET",
         headers: { "X-API-Key": SEEKNOW_API_KEY }
     });
     const responseTime = Date.now() - start;
     if (!skRes.ok) {
         const errBody = await skRes.json().catch(() => ({}));
-        log("WARN", "seeknow_osint_error", { path, status: skRes.status, ip, uid });
-        throw { status: skRes.status >= 500 ? 502 : skRes.status, error: errBody.message || `Erreur API (${skRes.status}).` };
+        log("WARN", "seeknow_osint_error", { skPath, status: skRes.status, ip, uid });
+        // Map SeeKnow upstream errors to clear client-facing messages.
+        // Never forward raw 401/403 — they'd be confused with our own auth errors.
+        const SK_ERRORS = {
+            401: { status: 502, error: "Clé API SeeKnow invalide. Contactez un administrateur." },
+            402: { status: 402, error: "Crédits SeeKnow insuffisants. Réessayez demain ou upgradez votre plan." },
+            403: { status: 403, error: "Accès refusé par SeeKnow — votre plan ne permet pas cette recherche ou la ressource est introuvable." },
+            404: { status: 404, error: "Aucun résultat trouvé pour cette requête." },
+            429: { status: 429, error: "Limite de requêtes SeeKnow atteinte. Réessayez dans quelques secondes." },
+        };
+        const mapped = SK_ERRORS[skRes.status];
+        if (mapped) throw mapped;
+        throw { status: 502, error: errBody.message || `Erreur upstream SeeKnow (${skRes.status}).` };
     }
     const data = await skRes.json();
-    log("INFO", "seeknow_osint", { uid, ip, path, ms: responseTime });
+    log("INFO", "seeknow_osint", { uid, ip, skPath, ms: responseTime });
     return { ...data, response_time_ms: responseTime };
 }
 
