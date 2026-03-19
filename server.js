@@ -594,9 +594,48 @@ async function doSeeKnow(query, type, uid, ip) {
         if (mapped) throw mapped;
         throw { status: 502, error: errBody.message || `Erreur upstream SeeKnow (${skRes.status}).`, detail: skRes.status };
     }
-    const data = await skRes.json();
-    log("INFO", "seeknow_search", { uid, ip, type, total: data.total, ms: responseTime });
-    return { ...data, response_time_ms: responseTime };
+    const raw = await skRes.json();
+    log("INFO", "seeknow_search", { uid, ip, type, total: raw.total, ms: responseTime });
+
+    // ── Normalize SeeKnow response ──
+    // SeeKnow can return flat results: [{source, email, ip, name, _origin, ...}]
+    // OR grouped results: [{database, infoLeak, data:[{...}]}]
+    // We always output the grouped format so the dashboard has one consistent structure.
+    const rawResults = raw.results || raw.data || [];
+    let normalized;
+    if (rawResults.length === 0) {
+        normalized = [];
+    } else {
+        const first = rawResults[0];
+        const isAlreadyGrouped = first && (first.database != null || Array.isArray(first.data));
+        if (isAlreadyGrouped) {
+            // Already in grouped format — use as-is
+            normalized = rawResults;
+        } else {
+            // Flat format — group by source field
+            const groups = new Map();
+            for (const entry of rawResults) {
+                const src = entry.source || entry.Source || entry._source || "Unknown";
+                if (!groups.has(src)) groups.set(src, []);
+                // Clone entry without the source/_origin meta fields
+                const { source, Source, _source, _origin, ...fields } = entry;
+                groups.get(src).push(fields);
+            }
+            normalized = [];
+            for (const [src, entries] of groups) {
+                normalized.push({ database: src, infoLeak: "", data: entries });
+            }
+        }
+    }
+
+    return {
+        success: raw.success !== false,
+        query: raw.query || query,
+        type: raw.type || type,
+        total: raw.total ?? rawResults.length,
+        results: normalized,
+        response_time_ms: responseTime
+    };
 }
 
 // GET helper for OSINT endpoints
