@@ -51,16 +51,21 @@ app.use(helmet({
 }));
 app.disable("x-powered-by");
 
-const normalizedOrigins = ALLOWED_ORIGINS.map(o => {
-    if (/^https?:\/\//.test(o)) return o;
-    return `https://${o}`;
-});
+const normalizeOrigin = (origin) => {
+    if (!origin || typeof origin !== 'string') return '';
+    const trimmed = origin.trim().toLowerCase().replace(/\/+$|^\s+|\s+$/g, '');
+    const stripped = trimmed.replace(/\/$/, '');
+    return /^https?:\/\//.test(stripped) ? stripped : `https://${stripped}`;
+};
+
+const normalizedOrigins = ALLOWED_ORIGINS.map(normalizeOrigin).filter(Boolean);
 
 const corsOptions = {
     origin: (origin, cb) => {
         if (!origin) return cb(null, true);
-        if (!normalizedOrigins.length || normalizedOrigins.includes(origin)) return cb(null, true);
-        log("WARN", "cors_blocked", { origin });
+        const normalized = normalizeOrigin(origin);
+        if (!normalizedOrigins.length || normalizedOrigins.includes(normalized)) return cb(null, true);
+        log("WARN", "cors_blocked", { origin, normalized });
         cb(new Error("Not allowed by CORS"));
     },
     methods:        ["GET", "POST", "DELETE", "OPTIONS"],
@@ -74,7 +79,8 @@ const io = socketIo(server, {
     cors: {
         origin: (origin, cb) => {
             if (!origin) return cb(null, true);
-            if (!normalizedOrigins.length || normalizedOrigins.includes(origin)) return cb(null, true);
+            const normalized = normalizeOrigin(origin);
+            if (!normalizedOrigins.length || normalizedOrigins.includes(normalized)) return cb(null, true);
             cb(new Error("Not allowed"));
         },
         methods: ["GET", "POST"], credentials: true
