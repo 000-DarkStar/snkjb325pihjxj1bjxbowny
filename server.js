@@ -14,7 +14,6 @@ const app    = express();
 const server = http.createServer(app);
 app.set("trust proxy", 1);
 
-// ==================== CONFIG ====================
 const PORT                 = process.env.PORT || 3000;
 const TURNSTILE_SECRET     = process.env.TURNSTILE_SECRET     || "0x4AAAAAACXtOAo2YMkszq-RYglD_O_URx8";
 const SUPABASE_URL         = process.env.SUPABASE_URL         || "https://ohmkqlouiepzkbyztnsm.supabase.co";
@@ -35,7 +34,6 @@ const ADMIN_UIDS = new Set([
 
 const VALID_PLANS = new Set(["free", "premium", "unlimited", "admin", "moderator"]);
 
-// ==================== LOGGING ====================
 const LOG_DIR  = path.join(__dirname, "logs");
 const LOG_FILE = path.join(LOG_DIR, "security.log");
 if (!fs.existsSync(LOG_DIR)) { try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (_) {} }
@@ -45,7 +43,6 @@ function log(level, event, details = {}) {
     try { fs.appendFileSync(LOG_FILE, entry + "\n"); } catch (_) {}
 }
 
-// ==================== SECURITY HEADERS ====================
 app.use(helmet({
     contentSecurityPolicy: false,
     hsts:           { maxAge: 31536000, includeSubDomains: true, preload: true },
@@ -55,7 +52,6 @@ app.use(helmet({
 }));
 app.disable("x-powered-by");
 
-// ==================== CORS ====================
 const normalizedOrigins = ALLOWED_ORIGINS.map(o => {
     if (/^https?:\/\//.test(o)) return o;
     return `https://${o}`;
@@ -75,7 +71,6 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-// ==================== SOCKET.IO ====================
 const io = socketIo(server, {
     cors: {
         origin: (origin, cb) => {
@@ -91,7 +86,6 @@ const io = socketIo(server, {
 app.use(express.json({ limit: "10kb" }));
 app.use(express.urlencoded({ extended: false, limit: "10kb" }));
 
-// ==================== RATE LIMITERS ====================
 const mkLimiter = (windowMs, max, msg) => rateLimit({
     windowMs, max, standardHeaders: true, legacyHeaders: false,
     keyGenerator: (req) => req.ip,
@@ -108,7 +102,6 @@ const searchLimiter      = mkLimiter(60 * 1000,       20, "Trop de requêtes de 
 const adminLimiter       = mkLimiter(60 * 1000,       60, "Trop de requêtes admin.");
 const historyLimiter     = mkLimiter(60 * 1000,       30, "Trop de requêtes history.");
 
-// ==================== AUTH MIDDLEWARE ====================
 async function requireAuth(req, res, next) {
     const auth = req.headers["authorization"];
     if (!auth?.startsWith("Bearer ")) return res.status(401).json({ error: "Non authentifié" });
@@ -134,23 +127,18 @@ async function requireAdmin(req, res, next) {
     } catch (_) { res.status(401).json({ error: "Erreur auth" }); }
 }
 
-// ==================== VALIDATION ====================
 const PWD_REGEX        = /^(?=.*[A-Z])(?=.*\d)(?=.*[^a-zA-Z0-9]).{8,72}$/;
 const validateEmail    = e => !!(e && typeof e === "string" && validator.isEmail(e.trim()) && e.length <= 254);
 const validatePassword = p => !!(p && typeof p === "string" && PWD_REGEX.test(p));
 const sanitize         = (s, n = 1000) => typeof s === "string" ? validator.escape(s.trim()).substring(0, n) : "";
 
-// ==================== CSRF ====================
 const csrfNonces = new Map();
 const generateCsrfNonce = () => { const n = crypto.randomBytes(32).toString("hex"); csrfNonces.set(n, { expiresAt: Date.now() + 5 * 60 * 1000 }); return n; };
 const consumeCsrfNonce = n => { if (!n || !csrfNonces.has(n)) return false; const { expiresAt } = csrfNonces.get(n); csrfNonces.delete(n); return Date.now() < expiresAt; };
 setInterval(() => { const now = Date.now(); for (const [k, v] of csrfNonces) if (now > v.expiresAt) csrfNonces.delete(k); }, 10 * 60 * 1000);
 
-// ==================== MAINTENANCE ====================
-// Cache court (3s) pour que les changements soient quasi-immédiats
 let _mntCache = null, _mntTs = 0;
 async function getMnt() {
-    // TTL court de 3 secondes pour réactivité immédiate
     if (_mntCache !== null && Date.now() - _mntTs < 3000) return _mntCache;
     if (!supabaseAdmin) { _mntCache = { active: false }; _mntTs = Date.now(); return _mntCache; }
     try {
@@ -161,7 +149,6 @@ async function getMnt() {
             .maybeSingle();
         if (error) {
             log("WARN", "getMnt_error", { msg: error.message });
-            // Ne pas écraser le cache en cas d'erreur DB
             if (_mntCache !== null) return _mntCache;
             _mntCache = { active: false };
         } else {
@@ -171,7 +158,6 @@ async function getMnt() {
             } else if (typeof v === "string") {
                 try { _mntCache = JSON.parse(v); } catch (_) { _mntCache = { active: false }; }
             } else {
-                // Supabase jsonb → déjà un objet
                 _mntCache = v;
             }
         }
@@ -185,7 +171,6 @@ async function getMnt() {
 }
 function invalidateMnt() { _mntCache = null; _mntTs = 0; }
 
-// ==================== MAINTENANCE GUARD ====================
 const MNT_WHITELIST = new Set([
     "/health", "/api/status", "/api/csrf-nonce",
     "/api/maintenance", "/api/admin/maintenance",
@@ -196,7 +181,6 @@ async function maintenanceGuard(req, res, next) {
     if (MNT_WHITELIST.has(req.path)) return next();
     const st = await getMnt();
     if (!st?.active) return next();
-    // Admins passent toujours
     const auth = req.headers["authorization"];
     if (auth?.startsWith("Bearer ") && supabaseAdmin) {
         try {
@@ -215,7 +199,6 @@ async function maintenanceGuard(req, res, next) {
 }
 app.use(maintenanceGuard);
 
-// ==================== STATS ====================
 let statsCache = { indexedLines: "1.9B", totalSearches: 0, registeredUsers: 0 };
 async function refreshStats() {
     if (!supabaseAdmin) return;
@@ -230,7 +213,6 @@ async function refreshStats() {
 refreshStats();
 setInterval(refreshStats, 5 * 60 * 1000);
 
-// ==================== SANCTIONS CACHE (30s TTL) ====================
 const sanctionCache = new Map();
 async function getSanction(authId) {
     const cached = sanctionCache.get(authId);
@@ -261,7 +243,6 @@ async function getSanction(authId) {
 }
 function invalidateSanction(authId) { if (authId) sanctionCache.delete(authId); }
 
-// ==================== IN-MEMORY STORES ====================
 const userActivities    = new Map();
 const userNotifications = new Map();
 const activeSessions    = new Map();
@@ -274,7 +255,6 @@ function pushActivity(uid, entry) {
     list.unshift({ id: `act_${Date.now()}_${Math.random().toString(36).slice(2,6)}`, ...entry, created_at: new Date().toISOString() });
     if (list.length > 200) list.length = 200;
     userActivities.set(uid, list);
-    // Persist to Supabase security_logs asynchronously
     if (supabaseAdmin && entry.type) {
         supabaseAdmin.from("security_logs").insert({
             user_id:            uid,
@@ -285,7 +265,6 @@ function pushActivity(uid, entry) {
     }
 }
 
-// ==================== SOCKET.IO ====================
 let onlineUsers = 0;
 const connectedSockets = new Map();
 const chatRateMap = new Map();
@@ -400,18 +379,14 @@ app.get("/api/maintenance", maintenanceLimiter, async (req, res) => {
 
 // ==================== MAINTENANCE ADMIN TOGGLE ====================
 // FIX: upsert avec value en JSONB — on envoie l'objet directement (pas stringifié)
-// FIX: invalidateMnt() immédiatement après la mise à jour
-// FIX: "active" accepte string "true"/"false" en plus de boolean
-app.post("/api/admin/maintenance", requireAdmin, maintenanceLimiter, async (req, res) => {
+async function handleAdminMaintenance(req, res) {
     if (!supabaseAdmin) return res.status(503).json({ error: "Service indisponible" });
     let { active, message, end_time, progress, steps } = req.body;
 
-    // Tolérer active comme string "true"/"false" (cas formulaire)
     if (typeof active === "string") active = active === "true";
     if (typeof active !== "boolean") return res.status(400).json({ error: "'active' (boolean) requis" });
 
     try {
-        // Lire l'état actuel SANS cache pour avoir la vraie valeur en DB
         invalidateMnt();
         const cur = await getMnt();
 
@@ -435,15 +410,12 @@ app.post("/api/admin/maintenance", requireAdmin, maintenanceLimiter, async (req,
             updated_at: new Date().toISOString()
         };
 
-        // upsert — la colonne value doit être jsonb dans Supabase
-        // On tente d'abord en tant qu'objet (jsonb natif), sinon en string
         let upsertError = null;
         const { error: e1 } = await supabaseAdmin
             .from("system_settings")
             .upsert({ key: "maintenance", value: newSt }, { onConflict: "key" });
         upsertError = e1;
 
-        // Si erreur de type (colonne text au lieu de jsonb), re-tenter avec JSON.stringify
         if (upsertError && upsertError.message?.includes("invalid input syntax")) {
             log("WARN", "mnt_jsonb_fallback", { msg: upsertError.message });
             const { error: e2 } = await supabaseAdmin
@@ -457,10 +429,8 @@ app.post("/api/admin/maintenance", requireAdmin, maintenanceLimiter, async (req,
             throw upsertError;
         }
 
-        // Invalider le cache immédiatement
         invalidateMnt();
 
-        // Notifier les clients Socket.IO si maintenance activée
         if (active) {
             for (const [sid, info] of connectedSockets) {
                 if (!ADMIN_UIDS.has(info.authId || "")) {
@@ -479,9 +449,12 @@ app.post("/api/admin/maintenance", requireAdmin, maintenanceLimiter, async (req,
         log("ERROR", "mnt_fail", { msg: e.message, code: e.code });
         res.status(500).json({ error: "Erreur mise à jour maintenance: " + e.message });
     }
-});
+}
 
-// ==================== ADMIN: SET PLAN ====================
+app.post("/api/admin/maintenance", requireAdmin, maintenanceLimiter, handleAdminMaintenance);
+app.post("/api/admin/applyMaint", requireAdmin, maintenanceLimiter, handleAdminMaintenance);
+app.post("/api/admin/applyMaintenance", requireAdmin, maintenanceLimiter, handleAdminMaintenance);
+
 app.post("/api/admin/set-plan", requireAdmin, adminLimiter, async (req, res) => {
     if (!supabaseAdmin) return res.status(503).json({ error: "Service indisponible" });
     const { user_id, auth_id, plan, max_credits } = req.body;
@@ -517,7 +490,6 @@ app.post("/api/admin/set-plan", requireAdmin, adminLimiter, async (req, res) => 
     }
 });
 
-// ==================== ADMIN: SET CREDITS ====================
 app.post("/api/admin/set-credits", requireAdmin, adminLimiter, async (req, res) => {
     if (!supabaseAdmin) return res.status(503).json({ error: "Service indisponible" });
     const { user_id, auth_id, action, amount } = req.body;
@@ -565,7 +537,6 @@ app.post("/api/admin/set-credits", requireAdmin, adminLimiter, async (req, res) 
     }
 });
 
-// ==================== LOG EVENT ====================
 app.post("/api/log-event", logLimiter, async (req, res) => {
     const { action_type, action_description, user_id } = req.body;
     if (!action_type || typeof action_type !== "string") return res.status(400).json({ error: "action_type requis" });
@@ -581,12 +552,10 @@ app.post("/api/log-event", logLimiter, async (req, res) => {
     } catch (_) { res.json({ success: true }); }
 });
 
-// ==================== STATS ====================
 app.get("/api/stats/dashboard", requireAuth, statsLimiter, (req, res) => {
     res.json({ ...statsCache, timestamp: new Date().toISOString() });
 });
 
-// ==================== CAPTCHA / REGISTER / LOGIN ====================
 app.post("/verify-captcha", captchaLimiter, async (req, res) => {
     const { token, csrfNonce } = req.body;
     if (!consumeCsrfNonce(csrfNonce))       return res.status(403).json({ success: false, message: "CSRF invalide" });
@@ -620,7 +589,6 @@ app.post("/validate-login", loginLimiter, (req, res) => {
     res.json({ success: true });
 });
 
-// ==================== NOTIFICATIONS ====================
 const notifyLimiter = mkLimiter(60 * 1000, 10, "Trop de notifications.");
 async function sendWebhook(payload) {
     if (!WEBHOOK_URL || WEBHOOK_URL.includes("ICI")) return;
@@ -656,7 +624,6 @@ app.post("/api/notify-login", requireAuth, notifyLimiter, async (req, res) => {
     res.json({ success: true });
 });
 
-// ==================== SEEKNOW SEARCH ====================
 const VALID_SEARCH_TYPES  = new Set(["email","username","phone","ip","domain","name","hash","auto","url","machine_id"]);
 const VALID_STEALER_TYPES = new Set(["email","username","ip","domain","url","machine_id","auto"]);
 const SK_BASE = "https://see-know.eu/api/v1";
@@ -696,7 +663,6 @@ async function doSeeKnow(query, type, uid, ip) {
     const raw = await skRes.json();
     log("INFO", "seeknow_search", { uid, ip, type, total: raw.total, ms: responseTime });
 
-    // Normalize to grouped format: [{database, infoLeak, data:[{...}]}]
     const rawResults = raw.results || raw.data || [];
     let normalized;
     if (rawResults.length === 0) {
@@ -761,7 +727,6 @@ async function doSeeKnowGet(skPath, params, uid, ip) {
     return { ...data, response_time_ms: responseTime };
 }
 
-// Main search routes
 app.post("/api/search", requireAuth, searchLimiter, async (req, res) => {
     const { query, type = "auto" } = req.body;
     if (!query || typeof query !== "string" || query.trim().length < 2)
@@ -802,7 +767,6 @@ app.post("/api/stealer", requireAuth, searchLimiter, async (req, res) => {
     }
 });
 
-// SeeKnow credits
 app.get("/api/sk-credits", requireAuth, async (req, res) => {
     try {
         const data = await doSeeKnowGet("/credits", {}, req.user.id, req.ip);
@@ -813,7 +777,6 @@ app.get("/api/sk-credits", requireAuth, async (req, res) => {
     }
 });
 
-// ==================== OSINT ENDPOINTS ====================
 const osintLimiter = mkLimiter(60 * 1000, 30, "Trop de requêtes OSINT.");
 
 function osintRoute(routePath, paramKey, skPath) {
@@ -850,7 +813,6 @@ osintRoute("phone",           "phone",    "/network/phone");
 osintRoute("domain-intel",    "domain",   "/domain/intel");
 osintRoute("whois",           "domain",   "/domain/whois");
 
-// ==================== AUTH ME ====================
 app.get("/api/auth/me", requireAuth, async (req, res) => {
     if (!supabaseAdmin) return res.status(503).json({ error: "Service indisponible" });
     try {
@@ -875,7 +837,6 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Erreur serveur" }); }
 });
 
-// ==================== REGISTER SYNC ====================
 app.post("/api/register", requireAuth, async (req, res) => {
     if (!supabaseAdmin) return res.json({ success: true });
     const { username } = req.body;
@@ -895,9 +856,7 @@ app.post("/api/register", requireAuth, async (req, res) => {
     } catch (e) { res.json({ success: true }); }
 });
 
-// ==================== API v1 ROUTES ====================
 
-// v1 search
 app.post("/api/v1/search", requireAuth, searchLimiter, async (req, res) => {
     const { query, type = "auto" } = req.body;
     if (!query || typeof query !== "string" || query.trim().length < 2)
@@ -917,7 +876,6 @@ app.post("/api/v1/search", requireAuth, searchLimiter, async (req, res) => {
     }
 });
 
-// v1 stealer
 app.post("/api/v1/stealer", requireAuth, searchLimiter, async (req, res) => {
     const { query, type = "auto" } = req.body;
     if (!query || typeof query !== "string" || query.trim().length < 2)
@@ -935,7 +893,6 @@ app.post("/api/v1/stealer", requireAuth, searchLimiter, async (req, res) => {
     }
 });
 
-// v1 auth me
 app.get("/api/v1/auth/me", requireAuth, async (req, res) => {
     if (!supabaseAdmin) return res.status(503).json({ error: "Service indisponible" });
     try {
@@ -954,7 +911,6 @@ app.get("/api/v1/auth/me", requireAuth, async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Erreur serveur" }); }
 });
 
-// v1 notifications
 app.get("/api/v1/account/notifications", requireAuth, async (req, res) => {
     const n = userNotifications.get(req.user.id) || [];
     res.json({ success: true, notifications: n, unread_count: n.filter(x => !x.read).length });
@@ -970,10 +926,8 @@ app.delete("/api/v1/account/notifications/:id", requireAuth, async (req, res) =>
     res.json({ success: true });
 });
 
-// ==================== v1 SESSIONS ====================
 app.get("/api/v1/auth/sessions", requireAuth, async (req, res) => {
     let sessions = activeSessions.get(req.user.id) || [];
-    // Fallback: read from Supabase sessions table
     if (supabaseAdmin && sessions.length === 0) {
         try {
             const { data } = await supabaseAdmin.from("sessions")
@@ -994,7 +948,6 @@ app.get("/api/v1/auth/sessions", requireAuth, async (req, res) => {
     res.json({ success: true, sessions });
 });
 
-// v1 track session — appelé depuis le dashboard au login
 app.post("/api/v1/auth/track-session", requireAuth, async (req, res) => {
     const { browser, device, sessionId } = req.body;
     const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip;
@@ -1053,11 +1006,9 @@ app.post("/api/v1/auth/revoke-all-sessions", requireAuth, async (req, res) => {
     res.json({ success: true });
 });
 
-// ==================== v1 ACTIVITIES & SECURITY LOGS ====================
 app.get("/api/v1/account/activities", requireAuth, async (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
     let acts = (userActivities.get(req.user.id) || []).slice(0, limit);
-    // Fallback: Supabase security_logs
     if (supabaseAdmin && acts.length === 0) {
         try {
             const { data } = await supabaseAdmin.from("security_logs")
@@ -1075,7 +1026,6 @@ app.get("/api/v1/account/activities", requireAuth, async (req, res) => {
     res.json({ success: true, activities: acts });
 });
 
-// Security logs from Supabase
 app.get("/api/v1/security/logs", requireAuth, async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit) || 20, 100);
     let logs = [];
@@ -1087,7 +1037,6 @@ app.get("/api/v1/security/logs", requireAuth, async (req, res) => {
             logs = data || [];
         } catch (_) {}
     }
-    // Merge with in-memory if empty
     if (logs.length === 0) {
         const memActs = userActivities.get(req.user.id) || [];
         logs = memActs.slice(0, limit).map(a => ({
@@ -1101,8 +1050,6 @@ app.get("/api/v1/security/logs", requireAuth, async (req, res) => {
     res.json({ success: true, logs, total: logs.length });
 });
 
-// ==================== v1 HISTORY ====================
-// Save a search to Supabase search_logs
 app.post("/api/v1/history", requireAuth, historyLimiter, async (req, res) => {
     const { query, search_type, total_results, response_time_ms } = req.body;
     if (!query || typeof query !== "string") return res.status(400).json({ error: "query requis" });
@@ -1117,14 +1064,12 @@ app.post("/api/v1/history", requireAuth, historyLimiter, async (req, res) => {
                 ip_address:       req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip
             });
         } catch (e) {
-            // Table may not exist yet — silently fail
             log("WARN", "history_insert_fail", { msg: e.message });
         }
     }
     res.json({ success: true });
 });
 
-// Get search history from Supabase
 app.get("/api/v1/history", requireAuth, historyLimiter, async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit) || 100, 500);
     const page  = Math.max(parseInt(req.query.page) || 0, 0);
@@ -1144,7 +1089,6 @@ app.get("/api/v1/history", requireAuth, historyLimiter, async (req, res) => {
     res.json({ success: true, history: rows, total: rows.length });
 });
 
-// ==================== v1 PASSWORD / PREFS / API KEY ====================
 app.post("/api/v1/auth/update-password", requireAuth, async (req, res) => {
     if (!supabaseAdmin) return res.status(503).json({ error: "Service indisponible" });
     const { newPassword } = req.body;
@@ -1196,7 +1140,6 @@ app.get("/api/v1/account/key-reset-status", requireAuth, async (req, res) => {
     res.json({ canReset: false, timeRemaining: remain + "h" });
 });
 
-// v1 sk-credits
 app.get("/api/v1/sk-credits", requireAuth, async (req, res) => {
     try {
         const data = await doSeeKnowGet("/credits", {}, req.user.id, req.ip);
@@ -1207,7 +1150,6 @@ app.get("/api/v1/sk-credits", requireAuth, async (req, res) => {
     }
 });
 
-// v1 osint routes
 function osintV1Route(routePath, paramKey, skPath) {
     app.get(`/api/v1/osint/${routePath}`, requireAuth, osintLimiter, async (req, res) => {
         const val = req.query[paramKey];
@@ -1240,7 +1182,6 @@ osintV1Route("roblox",          "username", "/gaming/roblox");
 osintV1Route("xbox",            "username", "/gaming/xbox");
 osintV1Route("minecraft",       "username", "/gaming/minecraft");
 
-// ==================== FALLBACK ====================
 app.use((req, res) => res.status(404).json({ error: "Route non trouvée" }));
 app.use((err, req, res, _next) => {
     log("ERROR", "unhandled", { msg: err.message });
