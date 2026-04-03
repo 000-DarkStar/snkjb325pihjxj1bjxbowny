@@ -215,7 +215,7 @@ async function refreshStats() {
         statsCache = { indexedLines: "1.9B", totalSearches: searches ?? 0, registeredUsers: users ?? 0 };
     } catch (_) {}
 }
-refreshStats();
+refreshStats().catch(e => log("WARN", "initial_refreshStats_fail", { msg: e.message }));
 setInterval(refreshStats, 5 * 60 * 1000);
 
 const sanctionCache = new Map();
@@ -360,8 +360,9 @@ io.on("connection", async (socket) => {
 
 // ==================== ROUTES ====================
 app.get("/favicon.ico", (req, res) => res.status(204).end());
-app.get("/health",      (req, res) => res.json({ status: "ok", timestamp: new Date().toISOString() }));
-app.get("/api/status",  (req, res) => res.json({ status: "online", onlineUsers, timestamp: new Date().toISOString() }));
+app.get("/health",      (req, res) => res.status(200).json({ status: "ok", timestamp: new Date().toISOString() }));
+app.get("/",            (req, res) => res.status(200).json({ status: "online", service: "rapace-backend", version: "2.0.0" }));
+app.get("/api/status",  (req, res) => res.json({ status: "online", onlineUsers, uptime: process.uptime(), timestamp: new Date().toISOString() }));
 app.get("/api/csrf-nonce", (req, res) => res.json({ nonce: generateCsrfNonce() }));
 
 // ==================== MAINTENANCE PUBLIC GET ====================
