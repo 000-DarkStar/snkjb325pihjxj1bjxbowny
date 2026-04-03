@@ -96,6 +96,21 @@ app.get("/health", (req, res) => res.json({ status: "ok", uptime: process.uptime
 app.get("/api/status", (req, res) => res.json({ status: "online", version: "2.0.0" }));
 app.get("/api/csrf-nonce", (req, res) => res.json({ nonce: crypto.randomBytes(32).toString("hex") }));
 
+app.post("/validate-login", async (req, res) => {
+  const { email, csrfNonce } = req.body;
+  if (!email || typeof email !== "string") {
+    return res.status(400).json({ success: false, message: "Email invalide" });
+  }
+  if (!csrfNonce || typeof csrfNonce !== "string") {
+    return res.status(400).json({ success: false, message: "Nonce invalide" });
+  }
+  res.json({ success: true });
+});
+
+app.post("/api/notify-login", requireAuth, async (req, res) => {
+  res.json({ success: true });
+});
+
 // ════════════════════════════════════════════════════
 // SOCKET.IO
 // ════════════════════════════════════════════════════
