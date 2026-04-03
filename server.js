@@ -20,8 +20,7 @@ const SUPABASE_URL         = process.env.SUPABASE_URL         || "https://ohmkql
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9obWtxbG91aWVwemtieXp0bnNtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTI2ODYyMywiZXhwIjoyMDg0ODQ0NjIzfQ.Z3BNfmfoWAO1ocgCJBadxfKF_X54fF9KZQfVn0woDes";
 const SEEKNOW_API_KEY      = process.env.SEEKNOW_API_KEY      || "seek-523cdcf15695be897f9f95b4ff4180ccad7a5802269de1c4";
 const WEBHOOK_URL          = process.env.WEBHOOK_URL          || "https://ptb.discord.com/api/webhooks/1473486621973151744/1Oy02CferN_JUUkkxOLHJSPxNVVst-mgGWE51KjOBJfzYZzh32HTahznN5hfdFEEBpqo";
-const ALLOWED_ORIGINS = ["https://rapace.pages.dev", "https://www.rapace.pages.dev"];
-    .split(",").map(s => s.trim()).filter(Boolean);
+const ALLOWED_ORIGINS      = (process.env.ALLOWED_ORIGINS || "https://rapace.pages.dev,https://www.rapace.pages.dev").split(",").map(s => s.trim()).filter(Boolean);
 
 const supabaseAdmin = (SUPABASE_URL && SUPABASE_SERVICE_KEY && !SUPABASE_SERVICE_KEY.includes("ICI"))
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } })
