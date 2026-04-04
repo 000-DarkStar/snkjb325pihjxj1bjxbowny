@@ -17,7 +17,7 @@ const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || "development";
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://ohmkqlouiepzkbyztnsm.supabase.co";
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9obWtxbG91aWVwemtieXp0bnNtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTI2ODYyMywiZXhwIjoyMDg0ODQ0NjIzfQ.Z3BNfmfoWAO1ocgCJBadxfKF_X54fF9KZQfVn0woDes";
-const SEEKNOW_API_KEY = process.env.SEEKNOW_API_KEY || "seek-523cdcf15695be897f9f95b4ff4180ccad7a5802269de1c4";
+const SEEKNOW_API_KEY = process.env.SEEKNOW_API_KEY || "seek-8dc2aedb7cf07a0faf0a0fae7e27a869ff9536e19ea676ef";
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "https://rapace.pages.dev,https://www.rapace.pages.dev").split(",").map(s => s.trim());
 
 const ADMIN_IDS = new Set(["5a819614-acac-4c54-a529-d15da447a47a", "d834eeb8-7eb5-4c61-a46e-e3c6d7fcadae"]);
