@@ -232,6 +232,7 @@ async function seeknowFetch(path, { method = "GET", body = null, searchParams = 
 // ════════════════════════════════════════════════════
 app.get("/api/v1/auth/me", requireAuth, async (req, res) => {
   try {
+    console.log('User ID:', req.user.id);
     const { data: user } = await supabaseAdmin.from("users").select("*").eq("auth_id", req.user.id).maybeSingle();
     res.json({
       auth_id: user?.auth_id,
