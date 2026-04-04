@@ -88,6 +88,41 @@ async function requireAuth(req, res, next) {
   }
 }
 
+function requireAdmin(req, res, next) {
+  if (!req.user || !ADMIN_IDS.has(req.user.id)) {
+    return res.status(403).json({ error: "Accès admin requis" });
+  }
+  next();
+}
+
+async function getMaintenanceValue() {
+  const { data, error } = await supabaseAdmin.from("system_settings").select("value").eq("key", "maintenance").maybeSingle();
+  if (error) throw error;
+  return data?.value || { active: false, message: "", end_time: null, progress: 0, steps: [] };
+}
+
+async function upsertMaintenanceValue(value) {
+  const { error } = await supabaseAdmin.from("system_settings").upsert({
+    key: "maintenance",
+    value,
+    updated_at: new Date().toISOString()
+  }, { onConflict: "key" });
+  if (error) throw error;
+}
+
+function buildUserFilter(body) {
+  if (body.auth_id) return { field: "auth_id", value: body.auth_id };
+  if (body.user_id) return { field: "id", value: body.user_id };
+  return null;
+}
+
+async function updateUserRow(filter, updates) {
+  const query = supabaseAdmin.from("users").update(updates);
+  query.eq(filter.field, filter.value);
+  const { error } = await query;
+  if (error) throw error;
+}
+
 // ════════════════════════════════════════════════════
 // PUBLIC ROUTES
 // ════════════════════════════════════════════════════
@@ -233,7 +268,15 @@ app.post("/api/v1/auth/track-session", requireAuth, async (req, res) => {
 app.get("/api/v1/auth/sessions", requireAuth, async (req, res) => {
   try {
     const { data } = await supabaseAdmin.from("sessions").select("*").eq("auth_id", req.user.id).limit(10);
-    res.json({ success: true, sessions: data || [] });
+    const sessions = Array.isArray(data) ? data.map((s) => ({
+      sessionId: s.id,
+      browser: s.browser,
+      device: s.device,
+      ip: s.ip_address || s.ip,
+      lastActivity: s.last_activity || s.lastActivity,
+      isCurrent: false
+    })) : [];
+    res.json({ success: true, sessions });
   } catch (e) {
     res.json({ success: true, sessions: [] });
   }
@@ -442,6 +485,99 @@ app.post("/api/v1/register", requireAuth, async (req, res) => {
     res.json({ success: true });
   } catch (e) {
     res.json({ success: true });
+  }
+});
+
+// ════════════════════════════════════════════════════
+// ADMIN / DASHBOARD ROUTES
+// ════════════════════════════════════════════════════
+app.get("/api/maintenance", async (req, res) => {
+  try {
+    const value = await getMaintenanceValue();
+    res.json({ success: true, ...value });
+  } catch (e) {
+    console.error("[MAINT_FETCH_ERROR]", e.message);
+    res.status(500).json({ error: "Impossible de charger l'état de maintenance" });
+  }
+});
+
+app.get("/api/stats/dashboard", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { count: registeredUsers, error: usersError } = await supabaseAdmin.from("users").select("id", { count: "exact", head: true });
+    const { count: totalSearches, error: searchesError } = await supabaseAdmin.from("search_logs").select("id", { count: "exact", head: true });
+    if (usersError || searchesError) {
+      console.error("[STATS_DASH_ERROR]", usersError || searchesError);
+      return res.status(500).json({ error: "Impossible de récupérer les statistiques" });
+    }
+    res.json({ registeredUsers: registeredUsers || 0, totalSearches: totalSearches || 0 });
+  } catch (e) {
+    console.error("[STATS_DASH_ERROR]", e.message);
+    res.status(500).json({ error: "Erreur récupération stats" });
+  }
+});
+
+app.post("/api/admin/maintenance", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { active = false, message = "", end_time = null, progress = 0, steps = [] } = req.body;
+    const value = {
+      active: Boolean(active),
+      message: String(message || ""),
+      end_time: end_time || null,
+      progress: Number(progress) || 0,
+      steps: Array.isArray(steps) ? steps : []
+    };
+    await upsertMaintenanceValue(value);
+    io.emit("maintenance");
+    res.json({ success: true, value });
+  } catch (e) {
+    console.error("[MAINT_UPDATE_ERROR]", e.message);
+    res.status(500).json({ error: "Impossible de mettre à jour la maintenance" });
+  }
+});
+
+app.post("/api/admin/set-plan", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const filter = buildUserFilter(req.body);
+    if (!filter) return res.status(400).json({ error: "Paramètres utilisateur requis" });
+    const updates = {};
+    if (req.body.plan) updates.plan = String(req.body.plan).substring(0, 50);
+    if (req.body.max_credits != null) updates.max_credits = Number(req.body.max_credits) || 0;
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: "Aucune mise à jour fournie" });
+    await updateUserRow(filter, updates);
+    res.json({ success: true });
+  } catch (e) {
+    console.error("[ADMIN_SET_PLAN_ERROR]", e.message);
+    res.status(500).json({ error: "Impossible de mettre à jour le plan" });
+  }
+});
+
+app.post("/api/admin/set-credits", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const filter = buildUserFilter(req.body);
+    if (!filter) return res.status(400).json({ error: "Paramètres utilisateur requis" });
+    const amount = Number(req.body.amount || 0);
+    if (isNaN(amount)) return res.status(400).json({ error: "Montant invalide" });
+
+    const { data, error } = await supabaseAdmin.from("users").select("credits,max_credits").eq(filter.field, filter.value).maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: "Utilisateur non trouvé" });
+
+    const updates = {};
+    if (req.body.action === "add") {
+      updates.credits = Number(data.credits || 0) + amount;
+    } else if (req.body.action === "set") {
+      updates.credits = amount;
+    } else if (req.body.action === "set_max") {
+      updates.max_credits = amount;
+    } else {
+      return res.status(400).json({ error: "Action invalide" });
+    }
+
+    await updateUserRow(filter, updates);
+    res.json({ success: true });
+  } catch (e) {
+    console.error("[ADMIN_SET_CREDITS_ERROR]", e.message);
+    res.status(500).json({ error: "Impossible de mettre à jour les crédits" });
   }
 });
 
