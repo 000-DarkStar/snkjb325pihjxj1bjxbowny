@@ -157,7 +157,7 @@ io.on("connection", (socket) => {
   onlineUsers++;
   io.emit("users", onlineUsers);
 
-  socket.on("chat:join", (data) => {
+  socket.on("chat:join", async (data) => {
     const pseudo = (data?.pseudo || "Anonymous").substring(0, 50);
     connectedSockets.set(socket.id, { pseudo });
     io.emit("chat:message", {
@@ -167,12 +167,36 @@ io.on("connection", (socket) => {
       created_at: new Date().toISOString(),
       isSystem: true
     });
+    // Send chat history
+    try {
+      const { data: messages } = await supabaseAdmin.from("chat_messages").select("*").order("created_at", { ascending: false }).limit(50);
+      if (messages) {
+        messages.reverse().forEach(msg => {
+          socket.emit("chat:message", {
+            id: `msg_${msg.id}`,
+            pseudo: msg.pseudo,
+            content: msg.content,
+            created_at: msg.created_at
+          });
+        });
+      }
+    } catch (e) {
+      console.error("[CHAT_HISTORY_ERROR]", e.message);
+    }
   });
 
-  socket.on("chat:send", (data) => {
+  socket.on("chat:send", async (data) => {
     if (!data?.content) return;
     const content = data.content.substring(0, 1000);
     const pseudo = (data.pseudo || "Anonymous").substring(0, 50);
+    try {
+      await supabaseAdmin.from("chat_messages").insert({
+        pseudo,
+        content
+      });
+    } catch (e) {
+      console.error("[CHAT_INSERT_ERROR]", e.message);
+    }
     io.emit("chat:message", {
       id: `msg_${Date.now()}`,
       pseudo,
