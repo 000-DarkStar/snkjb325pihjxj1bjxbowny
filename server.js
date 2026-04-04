@@ -229,26 +229,41 @@ async function seeknowFetch(path, { method = "GET", body = null, searchParams = 
   const url = new URL(`https://see-know.eu/api/v1${path}`);
   Object.entries(searchParams).forEach(([k, v]) => url.searchParams.set(k, v));
   
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000); // 12s timeout
+  
   const opts = {
     method,
-    headers: { "X-API-Key": SEEKNOW_API_KEY, "Content-Type": "application/json" }
+    headers: { "X-API-Key": SEEKNOW_API_KEY, "Content-Type": "application/json" },
+    signal: controller.signal
   };
   if (body) opts.body = JSON.stringify(body);
   
-  const res = await fetch(url.toString(), opts);
-  const data = await res.json();
-  
-  if (!res.ok) {
-    const errMap = {
-      401: "Clé API SeeKnow invalide",
-      402: "Crédits insuffisants",
-      403: "Accès refusé",
-      404: "Résultat non trouvé",
-      429: "Limite de requêtes atteinte"
-    };
-    throw { status: res.status, error: errMap[res.status] || data.message || "Erreur SeeKnow" };
+  try {
+    const res = await fetch(url.toString(), opts);
+    clearTimeout(timeout);
+    
+    let data;
+    try { data = await res.json(); } catch { data = {}; }
+    
+    if (!res.ok) {
+      const errMap = {
+        401: "Clé API SeeKnow invalide",
+        402: "Crédits insuffisants",
+        403: "Accès refusé",
+        404: "Résultat non trouvé",
+        429: "Limite de requêtes atteinte"
+      };
+      throw { status: res.status, error: errMap[res.status] || data.message || "Erreur SeeKnow" };
+    }
+    return data;
+  } catch (e) {
+    clearTimeout(timeout);
+    if (e.status) throw e; // erreur HTTP connue, re-throw
+    if (e.name === "AbortError") throw { status: 504, error: "SeeKnow API timeout (>12s)" };
+    console.error("[SEEKNOW_FETCH_ERROR]", e.message);
+    throw { status: 502, error: "SeeKnow API injoignable: " + e.message };
   }
-  return data;
 }
 
 // ════════════════════════════════════════════════════
@@ -346,8 +361,11 @@ app.post("/api/v1/search", requireAuth, searchLimiter, async (req, res) => {
     const data = await seeknowFetch("/search", { method: "POST", body: { query, type } });
     res.json(data);
   } catch (e) {
-    if (e.status) return res.status(e.status).json({ error: e.error });
-    res.status(502).json({ error: "Erreur API SeeKnow" });
+    if (e.status) {
+      const httpStatus = e.status === 401 ? 503 : e.status;
+      return res.status(httpStatus).json({ error: e.error });
+    }
+    res.status(502).json({ error: "SeeKnow API injoignable" });
   }
 });
 
@@ -358,8 +376,28 @@ app.post("/api/v1/stealer", requireAuth, searchLimiter, async (req, res) => {
     const data = await seeknowFetch("/stealer", { method: "POST", body: { query, type } });
     res.json(data);
   } catch (e) {
+    if (e.status) {
+      const httpStatus = e.status === 401 ? 503 : e.status;
+      return res.status(httpStatus).json({ error: e.error });
+    }
+    res.status(502).json({ error: "SeeKnow API injoignable" });
+  }
+});
+
+// ════════════════════════════════════════════════════
+// DEBUG / INTERNAL TEST ROUTE (no auth — admin IP only or remove after testing)
+// ════════════════════════════════════════════════════
+// Usage: GET /api/internal/discord-user?query=ID&_key=<SEEKNOW_API_KEY>
+app.get("/api/internal/discord-user", async (req, res) => {
+  const { query, _key } = req.query;
+  if (!query) return res.status(400).json({ error: "query requis" });
+  if (_key !== SEEKNOW_API_KEY) return res.status(403).json({ error: "Clé invalide" });
+  try {
+    const data = await seeknowFetch("/discord/user", { searchParams: { query } });
+    res.json(data);
+  } catch (e) {
     if (e.status) return res.status(e.status).json({ error: e.error });
-    res.status(502).json({ error: "Erreur API SeeKnow" });
+    res.status(502).json({ error: "Erreur SeeKnow", detail: e.message });
   }
 });
 
@@ -374,8 +412,12 @@ function createOsintRoute(path, paramName, seeknowPath) {
       const data = await seeknowFetch(seeknowPath, { method: "GET", searchParams: { [paramName]: value.substring(0, 200) } });
       res.json(data);
     } catch (e) {
-      if (e.status) return res.status(e.status).json({ error: e.error });
-      res.status(502).json({ error: "Erreur OSINT" });
+      if (e.status) {
+        // Transmettre le vrai code d'erreur Seeknow au client (sauf 401 → on met 503 pour éviter confusion avec auth)
+        const httpStatus = e.status === 401 ? 503 : e.status;
+        return res.status(httpStatus).json({ error: e.error });
+      }
+      res.status(502).json({ error: "SeeKnow API injoignable" });
     }
   });
 }
